@@ -190,7 +190,7 @@ redis-cli HGETALL 'alertstate:4a4f0d2b7c9e1a23'
 redis-cli HMGET 'alertstate:4a4f0d2b7c9e1a23' status first_firing_at last_seen_at starts_at alertname
 ```
 
-### Check remaining TTL on a closed alert tombstone
+### Check the remaining TTL on a closed alert tombstone
 
 ```bash
 redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
