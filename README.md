@@ -1,9 +1,27 @@
 alert-event-receiver
 --------------------
 # Overview
-Alertmanager webhook receiver that turns alert lifecycle transitions into immutable
+An Alertmanager webhook receiver that turns alert lifecycle transitions into immutable
 OpenTelemetry log events, with Redis/Valkey for deduplication and state tracking.
 
+# Why this receiver?
+
+Many teams struggle with alert fatigue:
+
+- alerts are not always treated as urgent incidents
+- response times are slow or inconsistent
+- people compensate by increasing `repeat_interval`, silencing alerts, or ignoring them
+
+Over time this can reduce trust in alerting and create noisy monitoring setups.
+
+Alertmanager is excellent at reliable notification delivery and is designed around a simple assumption: if nobody acted, keep reminding.
+That behavior is exactly right for urgent incidents, but it can be noisy for signals that still matter without requiring immediate action.
+
+This receiver keeps Alertmanager as the notification engine while turning alert lifecycle transitions into immutable OpenTelemetry log events.
+Those events can be stored in log backends such as VictoriaLogs, Parseable, or Loki and queried later with rich label-based filters.
+
+That makes it easier to keep truly urgent alerts for human response while still retaining searchable history for lower-priority signals,
+review, reporting, and work planning.
 
 ---
 
