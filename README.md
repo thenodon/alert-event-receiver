@@ -4,7 +4,6 @@ alert-event-receiver
 Alertmanager webhook receiver that turns alert lifecycle transitions into immutable
 OpenTelemetry log events, with Redis/Valkey for deduplication and state tracking.
 
-See [`docs/architecture.md`](docs/architecture.md) for the full design.
 
 ---
 
@@ -36,7 +35,7 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ADDRESS` | `:9011` | HTTP listen address (for example `:8080` or `127.0.0.1:8080`) |
+| `ADDRESS` | `:9011` | HTTP listen address (for example `:9011` or `127.0.0.1:9011`) |
 
 ## Redis / Valkey
 
