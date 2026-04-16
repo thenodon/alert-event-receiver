@@ -152,6 +152,125 @@ Behavior:
 - The TTL is controlled by `IDEMPOTENCY_TTL`.
 - The stored value is currently just `1`; the key name carries the useful information.
 
+## Deduplication and TTL behavior
+
+Deduplication happens in two layers:
+
+### 1. Identity: alert fingerprint
+
+The receiver uses `alert.Fingerprint` from the Alertmanager webhook payload as the identity of one alert instance.
+
+That means:
+
+- repeated notifications for the same alert instance reuse the same Redis state key
+- a new fingerprint is treated as a different alert instance
+- the receiver does not recompute identity from labels itself
+
+### 2. Delivery deduplication: idempotency keys
+
+For each transition, the receiver creates an idempotency key:
+
+```text
+alertidemp:{fingerprint}:{transition}:{unix_timestamp}
+```
+
+Timestamp source:
+
+- `firing` → `startsAt` (or `now` if missing)
+- `resolved` → `endsAt` (or `now` if missing)
+
+The key is written with `SET NX`:
+
+- if the key is new, the event is processed
+- if the key already exists, the event is dropped as a duplicate delivery
+
+This protects against webhook retries and repeated deliveries for the same transition.
+
+### 3. State-based suppression
+
+The receiver also uses the alert state hash to suppress repeated lifecycle events:
+
+- if state is already `firing` and another `firing` arrives, no new event is emitted
+- if state is `closed` and a new `firing` arrives, that is treated as a new cycle and a new firing event is emitted
+- if a `resolved` arrives without matching open state, the receiver still emits a resolved orphan event and writes a short-lived closed tombstone
+
+## TTLs used by the receiver
+
+### Open alert state: no TTL
+
+When an alert is open (`status=firing`), the receiver removes any TTL from `alertstate:{fingerprint}`.
+
+Reason:
+
+- open alerts are active working state and should not disappear while the alert is still firing
+
+Implication:
+
+- if Redis is cleared or keys are evicted externally, the receiver may later treat a resolved event as an orphan
+
+### `CLOSED_STATE_TTL`
+
+Applies to:
+
+- `alertstate:{fingerprint}` when the alert has been marked `closed`
+
+Default:
+
+- `24h`
+
+Reason:
+
+- keep a short-lived tombstone so repeated late `resolved` deliveries do not create duplicate resolved events
+- keep enough recent closed state to distinguish a genuine reopen from a duplicate late resolve
+
+If you increase it:
+
+- better protection against very late duplicate `resolved` deliveries
+- more Redis memory used by recently closed alerts
+- `closed` state entries stay around longer in operational queries and metrics
+
+If you decrease it:
+
+- less Redis memory used by closed alerts
+- greater chance that a late duplicate `resolved` arrives after the tombstone expired and is emitted again as a resolved orphan
+
+### `IDEMPOTENCY_TTL`
+
+Applies to:
+
+- `alertidemp:{fingerprint}:{transition}:{unix_timestamp}`
+
+Default:
+
+- `7d`
+
+Reason:
+
+- suppress duplicate deliveries and retries over a longer time window than the closed-state tombstone alone
+
+If you increase it:
+
+- better protection against delayed retries or replayed webhook deliveries
+- more Redis memory used by idempotency keys
+
+If you decrease it:
+
+- less Redis memory used by idempotency keys
+- greater chance that the same transition is accepted again after the idempotency key expires
+
+## TTL tuning guidance
+
+As a rule of thumb:
+
+- increase `CLOSED_STATE_TTL` if late `resolved` deliveries are common
+- increase `IDEMPOTENCY_TTL` if webhook retries/replays can happen over long periods
+- decrease them only if Redis memory pressure matters more than long-window duplicate suppression
+
+If you tune these values, the trade-off is simple:
+
+- longer TTLs = more duplicate protection, more Redis retention
+- shorter TTLs = less Redis retention, more risk of duplicate lifecycle events
+
 ## Inspecting data with `redis-cli`
 
 Connect to Redis/Valkey:
@@ -322,7 +441,6 @@ If you send the exact same transition again, the existing `alertidemp:*` key cau
 - If a duplicate delivery was suppressed, look for a matching `alertidemp:*` key.
 - If no `alertstate:*` key exists for a resolved alert, that can still be valid: the receiver emits a resolved orphan event and writes a short-lived closed tombstone.
 
-For the higher-level lifecycle and deduplication rules, see [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
