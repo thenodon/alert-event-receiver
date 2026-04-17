@@ -12,11 +12,17 @@ import (
 
 // Emit writes a LifecycleEvent as an OTel LogRecord.
 //
+// Attribute namespaces:
+//   - event.*             event metadata
+//   - alert.*             normalized alert lifecycle fields
+//   - alert.label.*       labels from the incoming alert payload
+//   - alert.annotation.*  annotations from the incoming alert payload
+//   - am.*                Alertmanager envelope metadata
+//
 // Field mapping:
-//   - Timestamp  ← event.EndsAt (resolved) or event.StartsAt (firing)
-//   - Body       ← "alert lifecycle event"
-//   - Severity   ← derived from alert labels["severity"]
-//   - Attributes ← all other event fields, labels (label.*), annotations (annotation.*)
+//   - Timestamp  <- event.EndsAt (resolved) or event.StartsAt (firing)
+//   - Body       <- "alert lifecycle event"
+//   - Severity   <- derived from alert labels["severity"]
 func (e *OTelEmitter) Emit(ctx context.Context, event models.LifecycleEvent) error {
 	var r otellog.Record
 
@@ -32,37 +38,37 @@ func (e *OTelEmitter) Emit(ctx context.Context, event models.LifecycleEvent) err
 	r.SetSeverityText(event.Labels["severity"])
 
 	attrs := []otellog.KeyValue{
-		otellog.String("event_kind", event.EventKind),
-		otellog.Int("event_version", event.EventVersion),
-		otellog.String("transition", event.Transition),
-		otellog.String("status", event.Status),
-		otellog.String("fingerprint", event.Fingerprint),
-		otellog.String("fingerprint_source", event.FingerprintSrc),
-		otellog.String("alertname", event.Alertname),
-		otellog.String("startsAt", event.StartsAt.UTC().Format("2006-01-02T15:04:05Z")),
-		otellog.Float64("duration_seconds", event.DurationSeconds),
-		otellog.String("state_write_result", event.StateWriteResult),
-		otellog.String("generatorURL", event.GeneratorURL),
-		otellog.String("am_group_key", event.AMGroupKey),
-		otellog.String("am_receiver", event.AMReceiver),
-		otellog.String("am_external_url", event.AMExternalURL),
+		otellog.String("event.kind", event.EventKind),
+		otellog.Int("event.version", event.EventVersion),
+		otellog.String("alert.transition", event.Transition),
+		otellog.String("alert.status", event.Status),
+		otellog.String("alert.fingerprint", event.Fingerprint),
+		otellog.String("alert.fingerprint_source", event.FingerprintSrc),
+		otellog.String("alert.alertname", event.Alertname),
+		otellog.String("alert.starts_at", event.StartsAt.UTC().Format("2006-01-02T15:04:05Z")),
+		otellog.Float64("alert.duration_seconds", event.DurationSeconds),
+		otellog.String("alert.state_write_result", event.StateWriteResult),
+		otellog.String("alert.generator_url", event.GeneratorURL),
+		otellog.String("am.group_key", event.AMGroupKey),
+		otellog.String("am.receiver", event.AMReceiver),
+		otellog.String("am.external_url", event.AMExternalURL),
 	}
 
 	if !event.EndsAt.IsZero() {
-		attrs = append(attrs, otellog.String("endsAt", event.EndsAt.UTC().Format("2006-01-02T15:04:05Z")))
+		attrs = append(attrs, otellog.String("alert.ends_at", event.EndsAt.UTC().Format("2006-01-02T15:04:05Z")))
 	}
 	if event.OrphanReason != "" {
-		attrs = append(attrs, otellog.String("orphan_reason", event.OrphanReason))
+		attrs = append(attrs, otellog.String("alert.orphan_reason", event.OrphanReason))
 	}
 
-	// Flatten labels as label.{key} attributes.
+	// Flatten labels as alert.label.{key} attributes.
 	for _, k := range sortedKeys(event.Labels) {
-		attrs = append(attrs, otellog.String(fmt.Sprintf("label.%s", k), event.Labels[k]))
+		attrs = append(attrs, otellog.String(fmt.Sprintf("alert.label.%s", k), event.Labels[k]))
 	}
 
-	// Flatten annotations as annotation.{key} attributes.
+	// Flatten annotations as alert.annotation.{key} attributes.
 	for _, k := range sortedKeys(event.Annotations) {
-		attrs = append(attrs, otellog.String(fmt.Sprintf("annotation.%s", k), event.Annotations[k]))
+		attrs = append(attrs, otellog.String(fmt.Sprintf("alert.annotation.%s", k), event.Annotations[k]))
 	}
 
 	r.AddAttributes(attrs...)
@@ -93,4 +99,3 @@ func sortedKeys(m map[string]string) []string {
 	sort.Strings(keys)
 	return keys
 }
-

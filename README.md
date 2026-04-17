@@ -543,35 +543,35 @@ Configuration example:
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:9428/insert/opentelemetry
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 # Define the fields tha should be used as stream labels - default will be determine from the log resource attributes
-export OTEL_EXPORTER_OTLP_HEADERS="VL-Stream-Fields=service.name,am_external_url"
+export OTEL_EXPORTER_OTLP_HEADERS="VL-Stream-Fields=service.name,am.external_url,alert.alertname,alert.fingerprint,alert.status,alert.transition"
 # Alternatively use the logs-specific var (takes precedence over OTEL_EXPORTER_OTLP_HEADERS):
-# export OTEL_EXPORTER_OTLP_LOGS_HEADERS="VL-Stream-Fields=alertname,severity,state_write_result,status,transition"
+# export OTEL_EXPORTER_OTLP_LOGS_HEADERS="VL-Stream-Fields=alert.alertname,alert.label.severity,alert.state_write_result,alert.status,alert.transition"
 ```
 ### Query examples in VictoriaLogs
 VictoriaLogs queries use LogsQL.
 
 #### All firing events for one service in the last hour
-    _time:1h service:checkout transition:firing
+    _time:1h alert.label.service:checkout alert.transition:firing
 
 #### All resolved events longer than 15 minutes
-    transition:resolved duration_seconds:>900
+    alert.transition:resolved alert.duration_seconds:>900
 #### Top flapping alerts
 Assuming one event per transition:
 ```
-_time:24h event_kind:alert_transition
-| stats by (alertname, service) count() as transitions
+_time:24h event.kind:alert_transition
+| stats by (alert.alertname, alert.label.service) count() as transitions
 | sort by (transitions desc)
 | limit 20
 ```
 
 #### Average duration by alertname
 ```
-_time:7d transition:resolved
-| stats by (alertname) avg(duration_seconds) as avg_duration, count() as total
+_time:7d alert.transition:resolved
+| stats by (alert.alertname) avg(alert.duration_seconds) as avg_duration, count() as total
 | sort by (avg_duration desc)
 ```
 
 #### Alerts resolved without ticket
 
 If there is a ticket_id label:
-    transition:resolved ticket_id:""
+    alert.transition:resolved alert.label.ticket_id:""
