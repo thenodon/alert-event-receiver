@@ -246,6 +246,10 @@ func TestCompleteOccurrenceReplacement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if got == nil {
+		t.Fatal("expected closed occurrence, got nil")
+		return
+	}
 	if !got.StartsAt.Equal(newer.StartsAt) || !got.EndsAt.Equal(newer.EndsAt) || got.Labels["obsolete"] != "" || got.Labels["new"] != "yes" || mr.TTL("alertstate:fp") <= 0 {
 		t.Fatalf("incorrect closed occurrence: %+v", got)
 	}
@@ -257,6 +261,10 @@ func TestCompleteOccurrenceReplacement(t *testing.T) {
 	got, err = store.GetState(ctx, "fp")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("expected reopened occurrence, got nil")
+		return
 	}
 	if !got.EndsAt.IsZero() || mr.TTL("alertstate:fp") != 0 {
 		t.Fatalf("reopen retained closure or TTL: %+v", got)
