@@ -1,657 +1,276 @@
-alert-event-receiver
---------------------
-# Overview
-An Alertmanager webhook receiver that turns alert lifecycle transitions into immutable
-OpenTelemetry log events, with Redis/Valkey for deduplication and state tracking.
+# alert-event-receiver
 
-# Why this receiver?
+An Alertmanager webhook receiver that converts alert lifecycle transitions into structured OpenTelemetry log events. It uses Redis/Valkey to track the latest alert occurrence and suppress duplicate lifecycle event emissions.
 
-Many teams struggle with alert fatigue:
+## Why?
 
-- alerts are not always treated as urgent incidents
-- response times are slow or inconsistent
-- people compensate by increasing `repeat_interval`, silencing alerts, or ignoring them
+Alertmanager is designed to repeat notifications until an alert is resolved or otherwise handled. This is useful for urgent incidents, but not every alert requires immediate human action. **alert-event-receiver** preserves a searchable history of firing and resolved transitions without requiring every alert to become a ticket or a page.
 
-Over time this can reduce trust in alerting and create noisy monitoring setups.
+Events can be sent through an OpenTelemetry Collector or directly to an OTLP-compatible backend, such as VictoriaLogs.
 
-Alertmanager is excellent at reliable notification delivery and is designed around a simple assumption: if nobody acted, keep reminding.
-That behavior is exactly right for urgent incidents, but it can be noisy for signals that still matter without requiring immediate action.
+> **Delivery limitation:** This initial implementation uses best-effort OTLP event delivery. State is written before emission; a crash or export failure can permanently lose a lifecycle event. Concurrent processing of the same fingerprint can also race. A durable outbox is planned; do not treat this release as a guaranteed-delivery audit log.
 
-This receiver keeps Alertmanager as the notification engine while turning alert lifecycle transitions into immutable OpenTelemetry log events.
-Those events can be stored in log backends such as VictoriaLogs, Parseable, or Loki and queried later with rich label-based filters.
+## Features
 
-That makes it easier to keep truly urgent alerts for human response while still retaining searchable history for lower-priority signals,
-review, reporting, and work planning.
+- Accepts Alertmanager webhook batches and processes each alert individually.
+- Distinguishes alert occurrences using the Alertmanager fingerprint and `startsAt` timestamp.
+- Handles opening, repeated firing, resolution, reopening, stale notifications, superseded firing, and orphan resolutions.
+- Tracks the latest occurrence in Redis/Valkey and uses expiring idempotency keys for emission deduplication.
+- Exports structured `firing` and `resolved` events via OTLP/gRPC or OTLP/HTTP.
+- Exposes Prometheus metrics, JSON application logs, and a health endpoint.
+- Supports versioned builds (`-version`).
 
----
-
-# How it works
-
-```
-Alertmanager (send_resolved: true)
-      │
-      │  POST /webhook
-      ▼
-alert-event-receiver
-  ├─ reads alert.Fingerprint as fingerprint identity key
-  ├─ checks Redis / Valkey for state
-  ├─ processes occurrence and updates state in Redis / Valkey
-  └─ deduplicates lifecycle event emission, then emits OTLP (firing | resolved)
-      │
-      │  OTLP/gRPC or OTLP/HTTP
-      ▼
-OTel Collector (optional)  →  VictoriaLogs / Loki / Grafana Cloud / …
-```
-
----
-
-# Configuration
-
-All configuration is via environment variables.
-
-## HTTP
-
-| Variable | Default | Description |
-|---|---|---|
-| `ADDRESS` | `:9011` | HTTP listen address (for example `:9011` or `127.0.0.1:9011`) |
-
-## Redis / Valkey
-
-| Variable | Default | Description |
-|---|---|---|
-| `REDIS_ADDR` | `localhost:6379` | Redis/Valkey address |
-| `REDIS_PASSWORD` | _(empty)_ | Password |
-| `REDIS_DB` | `0` | Database number |
-| `CLOSED_STATE_TTL` | `24h` | TTL for closed-state tombstones (prevents duplicate resolved events) |
-| `IDEMPOTENCY_TTL` | `168h` (7d) | TTL for idempotency keys |
-
-## OpenTelemetry
-
-The OTel SDK reads its standard environment variables automatically.
-You only need to set the relevant ones for your deployment:
-
-| Variable | Default | Description |
-|---|---|---|
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | Collector or backend endpoint |
-| `OTEL_EXPORTER_OTLP_HEADERS` | _(empty)_ | Auth headers (e.g. `Authorization=Bearer ...`) |
-| `OTEL_SERVICE_NAME` | `alert-event-receiver` | Service name on emitted records |
-| `OTEL_RESOURCE_ATTRIBUTES` | _(empty)_ | Extra resource attributes (e.g. `cluster=prod-eu1,tenant=platform`) |
-
----
-
-# Redis / Valkey storage model
-
-The receiver stores only **working state** in Redis/Valkey.
-It does **not** store the full alert history there.
-Full lifecycle history is emitted as OTLP log records.
-
-There are two key families:
-
-## Alert state hash
-
-One hash per alert fingerprint:
+## Architecture
 
 ```text
-alertstate:{fingerprint}
+Prometheus / vmalert
+        |
+        v
+    Alertmanager (send_resolved: true)
+        |
+        | POST /webhook
+        v
+ alert-event-receiver ---- Redis / Valkey
+        |                   latest occurrence state
+        |                   idempotency keys
+        |
+        | OTLP logs (gRPC or HTTP)
+        v
+ OTel Collector (optional) ----> VictoriaLogs / another OTLP backend
 ```
 
-Example:
+Redis/Valkey stores **working state**, not complete historical events. Lifecycle history is intended to live in the log backend.
 
-```text
-alertstate:4a4f0d2b7c9e1a23
-```
-
-Fields currently stored:
-
-- `status` → `firing` or `closed`
-- `first_firing_at` → first known firing timestamp for the current lifecycle
-- `last_seen_at` → last time a firing notification was seen- `starts_at` → Alertmanager `startsAt` occurrence identity (RFC3339Nano)
-- `ends_at` → resolution time for a closed occurrence; zero for firing
-- `alertname` → copied from alert labels
-- `label.*` → every alert label is stored with a `label.` prefix
-
-Example hash content:
-
-```text
-status=firing
-first_firing_at=2026-04-15T09:22:58Z
-last_seen_at=2026-04-15T09:23:14Z
-starts_at=2026-04-15T09:22:58Z
-alertname=HighErrorRate
-label.severity=warning
-label.service=checkout
-label.instance=checkout-7d8f9
-```
-
-Behavior:
-
-- When an alert is `firing`, the hash is written/updated and made persistent.
-- When an alert is `resolved`, the complete closed occurrence is written with `status=closed` and a TTL is applied using `CLOSED_STATE_TTL`.
-- That short-lived closed tombstone prevents duplicate late `resolved` deliveries from creating extra resolved events.
-
-## Idempotency keys
-
-One short-lived string key per transition delivery:
-
-```text
-alertidemp:{fingerprint}:{startsAt}:{transition}
-```
-
-Examples:
-
-```text
-alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing
-alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved
-```
-
-Behavior:
-
-- The key is written with Redis `SET NX`.
-- If it already exists, only lifecycle event emission is suppressed; lifecycle processing still runs.
-- The TTL is controlled by `IDEMPOTENCY_TTL`.
-- The stored value is currently just `1`; the key name carries the useful information.
-
-## Deduplication and TTL behavior
-
-Deduplication uses identity, lifecycle state, and emission keys:
-
-### 1. Identity: alert fingerprint
-
-The receiver uses `alert.Fingerprint` from the Alertmanager webhook payload as the identity of one alert instance.
-
-That means:
-
-- repeated notifications for the same alert instance reuse the same Redis state key
-- a new fingerprint is treated as a different alert instance
-- the receiver does not recompute identity from labels itself
-
-### 2. Delivery deduplication: idempotency keys
-
-For each transition, the receiver creates an idempotency key:
-
-```text
-alertidemp:{fingerprint}:{startsAt}:{transition}
-```
-
-Timestamp source:
-
-- Both transitions use the occurrence `startsAt`, encoded as canonical UTC RFC3339Nano.
-- `endsAt` is excluded; distinct occurrences within the same second have distinct keys.
-- No legacy-key compatibility or migration is provided.
-
-The key is written with `SET NX`:
-
-- if the key is new, the detected lifecycle event is emitted
-- if the key already exists, event emission is suppressed; the processing result still reports the detected transition
-
-This protects against webhook retries and repeated deliveries for the same transition.
-
-### 3. State-based suppression
-
-The receiver also uses the alert state hash to suppress repeated lifecycle events:
-
-- if the same occurrence is already `firing`, another `firing` refreshes last_seen_at without an event; older occurrences are stale and newer ones supersede it
-- if state is `closed`, a firing notification reopens it only when both stored and incoming `startsAt` are known and incoming `startsAt` is strictly newer
-- if a `resolved` arrives without matching open state, the receiver still emits a resolved orphan event and writes a short-lived closed tombstone
-
-## TTLs used by the receiver
-
-### Open alert state: no TTL
-
-When an alert is open (`status=firing`), the receiver removes any TTL from `alertstate:{fingerprint}`.
-
-Reason:
-
-- open alerts are active working state and should not disappear while the alert is still firing
-
-Implication:
-
-- if Redis is cleared or keys are evicted externally, the receiver may later treat a resolved event as an orphan
-
-### `CLOSED_STATE_TTL`
-
-Applies to:
-
-- `alertstate:{fingerprint}` when the alert has been marked `closed`
-
-Default:
-
-- `24h`
-
-Reason:
-
-- keep a short-lived tombstone so repeated late `resolved` deliveries do not create duplicate resolved events
-- keep enough recent closed state to distinguish a genuine reopen from a duplicate late resolve
-
-If you increase it:
-
-- better protection against very late duplicate `resolved` deliveries
-- more Redis memory used by recently closed alerts
-- `closed` state entries stay around longer in operational queries and metrics
-
-If you decrease it:
-
-- less Redis memory used by closed alerts
-- greater chance that a late duplicate `resolved` arrives after the tombstone expired and is emitted again as a resolved orphan
-
-### `IDEMPOTENCY_TTL`
-
-Applies to:
-
-- `alertidemp:{fingerprint}:{startsAt}:{transition}`
-
-Default:
-
-- `7d`
-
-Reason:
-
-- suppress duplicate deliveries and retries over a longer time window than the closed-state tombstone alone
-
-If you increase it:
-
-- better protection against delayed retries or replayed webhook deliveries
-- more Redis memory used by idempotency keys
-
-If you decrease it:
-
-- less Redis memory used by idempotency keys
-- greater chance that the same transition is accepted again after the idempotency key expires
-
-## TTL tuning guidance
-
-As a rule of thumb:
-
-- increase `CLOSED_STATE_TTL` if late `resolved` deliveries are common
-- increase `IDEMPOTENCY_TTL` if webhook retries/replays can happen over long periods
-- decrease them only if Redis memory pressure matters more than long-window duplicate suppression
-
-If you tune these values, the trade-off is simple:
-
-- longer TTLs = more duplicate protection, more Redis retention
-- shorter TTLs = less Redis retention, more risk of duplicate lifecycle events
-
-## Inspecting data with `redis-cli`
-
-Connect to Redis/Valkey:
-
-```bash
-redis-cli -h localhost -p 6379
-```
-
-If you use a password:
-
-```bash
-redis-cli -h localhost -p 6379 -a "$REDIS_PASSWORD"
-```
-
-If you use a non-default DB:
-
-```bash
-redis-cli -h localhost -p 6379 -n 2
-```
-
-### List alert state keys
-
-```bash
-redis-cli --scan --pattern 'alertstate:*'
-```
-
-### Read one alert state hash
-
-```bash
-redis-cli HGETALL 'alertstate:4a4f0d2b7c9e1a23'
-```
-
-### Read specific fields only
-
-```bash
-redis-cli HMGET 'alertstate:4a4f0d2b7c9e1a23' status first_firing_at last_seen_at starts_at alertname
-```
-
-### Check the remaining TTL on a closed alert tombstone
-
-```bash
-redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
-```
-
-Interpretation:
-
-- `-1` → key exists and has no TTL (typically an open/firing alert)
-- `-2` → key does not exist
-- positive integer → seconds until the closed tombstone expires
-
-### List idempotency keys
-
-```bash
-redis-cli --scan --pattern 'alertidemp:*'
-```
-
-### Inspect one idempotency key
-
-```bash
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
-```
-
-### Find all keys for one fingerprint
-
-```bash
-redis-cli --scan --pattern 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli --scan --pattern 'alertidemp:4a4f0d2b7c9e1a23:*'
-```
-
-### Show only stored labels for one alert
-
-```bash
-redis-cli HGETALL 'alertstate:4a4f0d2b7c9e1a23' | grep '^label\.'
-```
-
-## End-to-end example (webhook -> Redis keys)
-
-The example below shows a minimal lifecycle for one alert fingerprint.
-
-### Step 1: Firing webhook alert
-
-```json
-{
-  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
-  "receiver": "event-webhook",
-  "externalURL": "https://alertmanager.example",
-  "alerts": [
-    {
-      "status": "firing",
-      "fingerprint": "4a4f0d2b7c9e1a23",
-      "startsAt": "2026-04-15T09:22:58Z",
-      "labels": {
-        "alertname": "HighErrorRate",
-        "severity": "warning",
-        "service": "checkout",
-        "instance": "checkout-7d8f9"
-      },
-      "annotations": {
-        "summary": "Checkout error rate is high"
-      }
-    }
-  ]
-}
-```
-
-Expected Redis writes:
-
-- `alertstate:4a4f0d2b7c9e1a23` hash with `status=firing` and `label.*` fields
-- `alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing` with value `1` and `IDEMPOTENCY_TTL`
-
-Inspect with `redis-cli`:
-
-```bash
-redis-cli HGETALL 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing'
-```
-
-At this point, state key TTL should usually be `-1` (open alert, persisted).
-
-### Step 2: Resolved webhook alert
-
-```json
-{
-  "groupKey": "{}:{alertname=\"HighErrorRate\"}",
-  "receiver": "event-webhook",
-  "externalURL": "https://alertmanager.example",
-  "alerts": [
-    {
-      "status": "resolved",
-      "fingerprint": "4a4f0d2b7c9e1a23",
-      "startsAt": "2026-04-15T09:22:58Z",
-      "endsAt": "2026-04-15T09:41:01Z",
-      "labels": {
-        "alertname": "HighErrorRate",
-        "severity": "warning",
-        "service": "checkout",
-        "instance": "checkout-7d8f9"
-      }
-    }
-  ]
-}
-```
-
-Expected Redis writes/updates:
-
-- `alertstate:4a4f0d2b7c9e1a23` updated to `status=closed`
-- `alertstate:*` gets a TTL from `CLOSED_STATE_TTL`
-- `alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved` with value `1` and `IDEMPOTENCY_TTL`
-
-Inspect with `redis-cli`:
-
-```bash
-redis-cli HMGET 'alertstate:4a4f0d2b7c9e1a23' status first_firing_at last_seen_at starts_at alertname
-redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
-```
-
-If you send the exact same notification again, lifecycle processing runs again. Repeated firing for the same occurrence refreshes `last_seen_at`; repeated resolved leaves the tombstone unchanged. Neither generates another event.
-
-## Troubleshooting notes
-
-- If an alert is currently open, expect `status=firing` and `TTL = -1`.
-- If an alert was recently resolved, expect `status=closed` and a positive TTL.
-- If a duplicate delivery was suppressed, look for a matching `alertidemp:*` key.
-- If no `alertstate:*` key exists for a resolved alert, that can still be valid: the receiver emits a resolved orphan event and writes a short-lived closed tombstone.
-
-
----
-
-# Running locally
-
-## Prerequisites
-
-- Go 1.23+
-- Redis or Valkey
-- An OTLP-compatible log backend (or OTel Collector)
-
-```bash
-go build -o alert_event_receiver ./cmd/server
-```
 ## Quick start
 
-```bash
-# Start Redis
-docker run -d -p 6379:6379 redis:7
+Requirements: Go 1.23+, Redis or Valkey, and an OTLP-compatible log receiver.
 
-# Start an OTel Collector or any OTLP-compatible backend, then:
+```bash
+# Build the application
+go build -o alert_event_receiver ./cmd/server
+
+# Start a local Redis instance (example)
+docker run --rm -d --name alert-event-redis -p 6379:6379 redis:7
+
+# Point OTLP at a running Collector (or compatible receiver)
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
-export OTEL_RESOURCE_ATTRIBUTES="cluster=local,tenant=dev"
 
-go run ./cmd/server
+./alert_event_receiver
 ```
 
-## Endpoints
-
-| Path | Method | Description |
-|---|---|---|
-| `/webhook` | POST | Alertmanager webhook receiver |
-| `/metrics` | GET | Prometheus metrics (RED pattern) |
-| `/healthz` | GET | Health check |
-
----
-
-# Observability
-
-## Prometheus metrics
-
-| Metric | Labels | Description |
-|---|---|---|
-| `alertreceiver_webhook_requests_total` | `status` (2xx/4xx/5xx) | Webhook request rate |
-| `alertreceiver_webhook_duration_seconds` | `status` | Webhook latency histogram |
-| `alertreceiver_events_emitted_total` | `transition` (firing/resolved) | Events emitted via OTLP |
-| `alertreceiver_emit_errors_total` | `transition` | OTLP emit failures |
-| `alertreceiver_redis_errors_total` | `operation` | Redis operation errors |
-| `alertreceiver_redis_ops_total` | `operation`, `result` | Redis operation outcomes |
-| `alertreceiver_redis_op_duration_seconds` | `operation` | Redis operation latency histogram |
-| `alertreceiver_redis_idemp_setnx_total` | `result` (`set`/`exists`/`error`) | Idempotency `SET NX` outcomes |
-| `alertreceiver_duplicates_dropped_total` | — | Lifecycle event emissions suppressed by idempotency check |
-| `alertreceiver_state_writes_total` | `result` | Alert transition outcomes such as `opened`, `reopened`, `closed`, `resolved_without_open_state`, `already_firing` |
-| `alertreceiver_state_entries` | `status` (`firing`/`closed`) | Current Redis-backed alert state entries maintained from write-path updates |
-| `alertreceiver_idempotency_keys_created_total` | `transition` | Idempotency keys created successfully |
-| `alertreceiver_resolved_orphans_total` | — | Resolved alerts seen without matching open state |
-| `alertreceiver_closed_ttl_seconds` | — | TTL applied to closed alert tombstones |
-
-## Internal logs
-
-Structured JSON written to stdout. All errors against Redis and the OTLP backend
-are logged with context (fingerprint, alertname, operation, error).
-
----
-
-# Running tests
+The default HTTP listener is `:9011`. Verify startup:
 
 ```bash
-go test ./...
+curl -fsS http://localhost:9011/healthz
+curl -fsS http://localhost:9011/metrics | head
+./alert_event_receiver -version
 ```
 
----
+The health endpoint returns HTTP 200; it is not a comprehensive Redis or OTLP readiness check.
 
-# Project structure
+### Configure Alertmanager
 
+Add a webhook receiver and route alerts to it. This is an **example**: adapt the route to your existing Alertmanager configuration instead of replacing your routing tree.
+
+```yaml
+route:
+  receiver: alert-event-receiver
+  group_by: [alertname]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+receivers:
+  - name: alert-event-receiver
+    webhook_configs:
+      - url: http://alert-event-receiver.example:9011/webhook
+        send_resolved: true
 ```
-cmd/server/              main — wires dependencies and starts HTTP server
-internal/
-  config/                env var config loading
-  models/                Alertmanager webhook payload + LifecycleEvent types
-  processor/             alert state transition logic
-  state/                 Redis/Valkey Store interface + implementation
-  telemetry/
-    logger.go            JSON slog logger (stdout)
-    metrics.go           Prometheus RED metrics
-    otel.go              OTel SDK init (log provider)
-    emitter.go           OTelEmitter — maps LifecycleEvent → OTel LogRecord
-  webhook/               HTTP handler for Alertmanager webhook
-docs/
-  architecture.md        Full design document
-```
 
-# Log storage
+The URL must be reachable from Alertmanager. `send_resolved: true` is essential to receive resolution transitions. Keep your existing routing and receivers as appropriate.
 
-## VictoriaMetrics VisctoriaLogs
-VictoriaMetrics Logs support direct OTLP ingestion over HTTP.
-Configuration example:
+### Send a test webhook
+
+With the receiver running, POST an example firing notification:
+
 ```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:9428/insert/opentelemetry
+curl -i -X POST http://localhost:9011/webhook \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "receiver":"alert-event-receiver",
+    "status":"firing",
+    "groupKey":"test-group",
+    "externalURL":"http://alertmanager.example",
+    "alerts":[{
+      "status":"firing",
+      "fingerprint":"test-fingerprint-001",
+      "startsAt":"2026-11-06T10:00:00Z",
+      "labels":{"alertname":"TestAlert","severity":"warning","service":"demo"},
+      "annotations":{"summary":"Test firing event"}
+    }]
+  }'
+```
+
+A successful HTTP 200 means processing completed without a reported error; it does **not** confirm durable delivery to the log backend. Check application logs, the Prometheus metrics, and the configured OTLP destination. For a resolution test, send another notification with the **same fingerprint and `startsAt`**, `status: "resolved"`, and an `endsAt` timestamp at or after `startsAt`.
+
+## Configuration
+
+All application settings are supplied through environment variables.
+
+### HTTP and Redis/Valkey
+
+| Variable | Default | Description |
+|---|---|---|
+| `ADDRESS` | `:9011` | HTTP listen address |
+| `REDIS_ADDR` | `localhost:6379` | Redis/Valkey endpoint |
+| `REDIS_PASSWORD` | empty | Redis/Valkey password |
+| `REDIS_DB` | `0` | Database number |
+| `CLOSED_STATE_TTL` | `24h` | Retention of closed occurrence tombstones |
+| `IDEMPOTENCY_TTL` | `168h` (7 days) | Retention of emission idempotency keys |
+
+Duration settings use Go duration syntax, e.g. `30m`, `24h`, `168h`. **Currently, invalid duration strings silently fall back to the defaults**; verify configuration carefully.
+
+### OpenTelemetry
+
+The SDK reads standard OTLP exporter environment variables.
+
+| Variable | Default / example | Description |
+|---|---|---|
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | OTLP destination for the chosen protocol |
+| `OTEL_EXPORTER_OTLP_HEADERS` | empty | Optional authentication or backend headers |
+| `OTEL_EXPORTER_OTLP_LOGS_HEADERS` | empty | Optional log-specific exporter headers |
+| `OTEL_SERVICE_NAME` | `alert-event-receiver` | Service name on emitted records |
+| `OTEL_RESOURCE_ATTRIBUTES` | e.g. `cluster=dev,tenant=platform` | Additional resource attributes |
+
+For an OTLP/HTTP endpoint, configure `http/protobuf` and use the URL required by your backend. For example, the existing VictoriaLogs integration uses:
+
+```bash
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-# Define the fields tha should be used as stream labels - default will be determine from the log resource attributes
-export OTEL_EXPORTER_OTLP_HEADERS="VL-Stream-Fields=service.name,am.external_url,alert.alertname,alert.fingerprint,alert.status,alert.transition"
-# Alternatively use the logs-specific var (takes precedence over OTEL_EXPORTER_OTLP_HEADERS):
-# export OTEL_EXPORTER_OTLP_LOGS_HEADERS="VL-Stream-Fields=alert.alertname,alert.label.severity,alert.state_write_result,alert.status,alert.transition"
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:9428/insert/opentelemetry
+export OTEL_EXPORTER_OTLP_HEADERS='VL-Stream-Fields=service.name,am.external_url,alert.alertname,alert.fingerprint,alert.status,alert.transition'
 ```
-### Query examples in VictoriaLogs
-VictoriaLogs queries use LogsQL.
 
-#### All firing events for one service in the last hour
-    _time:1h alert.label.service:checkout alert.transition:firing
+Backend-specific headers and URL paths should be checked against your deployed backend version. An OpenTelemetry Collector is an alternative when you want centralized routing or buffering.
 
-#### All resolved events longer than 15 minutes
-    alert.transition:resolved alert.duration_seconds:>900
-#### Top flapping alerts
-Assuming one event per transition:
+## Lifecycle processing
+
+The receiver uses the **Alertmanager fingerprint** as the alert identity. Each distinct occurrence is identified by that fingerprint plus its `startsAt` instant (compared with nanosecond precision, independent of timezone offset). `endsAt` is the resolution time, **not** part of occurrence identity.
+
+Valid firing and resolved notifications require a nonempty fingerprint and nonzero `startsAt`. Resolved notifications additionally require nonzero `endsAt >= startsAt`.
+
+| Stored occurrence | Incoming alert | Result | Lifecycle event |
+|---|---|---|---|
+| Missing | Firing | Opened | Firing |
+| Missing | Resolved | Orphan resolution; closed tombstone | Resolved |
+| Firing | Same occurrence, firing | Refresh `last_seen_at` | None |
+| Firing | Same occurrence, resolved | Closed | Resolved |
+| Firing | Older occurrence | Stale; state unchanged | None |
+| Firing | Newer firing | Supersede old open occurrence | Firing |
+| Firing | Newer resolved | Orphan resolution; replace occurrence | Resolved |
+| Closed | Same occurrence, resolved | Repeated resolution | None |
+| Closed | Same or older firing | Stale; state unchanged | None |
+| Closed | Older resolved | Stale; state unchanged | None |
+| Closed | Newer firing | Reopened | Firing |
+| Closed | Newer resolved | Orphan resolution; replace occurrence | Resolved |
+
+A newer firing can supersede an older open occurrence **without synthesizing a resolution** for the old occurrence. The emitted firing event retains `state_write_result=opened`; the processing result distinguishes `SupersededFiring`. A repeated resolution does not refresh the tombstone TTL; the first accepted closure wins.
+
+Idempotency checks suppress **event emission**, not lifecycle processing. Required Redis/Valkey read/write failures return processing errors rather than authoritative state decisions. If any alert in a webhook batch fails processing, the handler returns HTTP 500 after attempting the remaining alerts; Alertmanager may retry the entire batch. Malformed JSON returns HTTP 400.
+
+### Redis/Valkey debugging
+
+The receiver uses:
+
+- `alertstate:{fingerprint}` — hash holding the latest firing or closed occurrence.
+- `alertidemp:{fingerprint}:{startsAt}:{transition}` — expiring emission idempotency key; `startsAt` is canonical UTC RFC3339Nano.
+
+Open firing state has no TTL. Closed tombstones default to 24 hours, and idempotency keys default to seven days. These periods trade memory use against protection from delayed duplicate notifications.
+
+**For the full schema, inspection commands, TTL interpretation, failure scenarios, and step-by-step debugging, see [Redis/Valkey debugging](docs/redis-debugging.md).**
+
+## HTTP endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/webhook` | Receive grouped Alertmanager webhook notifications |
+| `GET` | `/metrics` | Prometheus operational metrics |
+| `GET` | `/healthz` | Basic HTTP health check |
+
+## Observability
+
+The receiver writes structured JSON logs to stdout. Its Prometheus metrics include:
+
+| Metric | Description |
+|---|---|
+| `alertreceiver_webhook_requests_total` | Webhook requests by HTTP status class |
+| `alertreceiver_webhook_duration_seconds` | Webhook request latency |
+| `alertreceiver_events_emitted_total` | Events accepted by the OTLP emitter, by transition |
+| `alertreceiver_emit_errors_total` | Emitter failures |
+| `alertreceiver_redis_errors_total` | Redis operation errors |
+| `alertreceiver_redis_ops_total` | Redis operation outcomes |
+| `alertreceiver_redis_op_duration_seconds` | Redis operation latency |
+| `alertreceiver_redis_idemp_setnx_total` | Idempotency `SET NX` outcomes |
+| `alertreceiver_duplicates_dropped_total` | Event emissions suppressed by idempotency |
+| `alertreceiver_state_writes_total` | State write / transition results |
+| `alertreceiver_state_entries` | Locally maintained estimate of tracked state entries |
+| `alertreceiver_idempotency_keys_created_total` | Created idempotency keys |
+| `alertreceiver_resolved_orphans_total` | Resolutions without matching open occurrence |
+| `alertreceiver_closed_ttl_seconds` | Applied closed-state TTL observations |
+
+**Metric caveat:** `alertreceiver_state_entries` is updated from this process's write path. It is **not** a live count of all Redis keys; it can diverge after restart, tombstone expiry, or changes made by another instance.
+
+### VictoriaLogs query examples
+
+These examples use VictoriaLogs LogsQL and assume the event attributes are indexed as shown:
+
+```logsql
+_time:1h alert.label.service:checkout alert.transition:firing
 ```
+
+```logsql
+_time:7d alert.transition:resolved
+| stats by (alert.alertname) avg(alert.duration_seconds) as avg_duration, count() as total
+| sort by (avg_duration desc)
+```
+
+```logsql
 _time:24h event.kind:alert_transition
 | stats by (alert.alertname, alert.label.service) count() as transitions
 | sort by (transitions desc)
 | limit 20
 ```
 
-#### Average duration by alertname
+Adjust field names and stream settings to match your OTLP ingestion configuration.
+
+## Development and releases
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+go build -o alert_event_receiver ./cmd/server
+./alert_event_receiver -version
 ```
-_time:7d alert.transition:resolved
-| stats by (alert.alertname) avg(alert.duration_seconds) as avg_duration, count() as total
-| sort by (avg_duration desc)
+
+The repository uses Go 1.23. GitHub Releases provide versioned builds; the `-version` flag prints the version injected at build time (or `unknown` when not set).
+
+## Current limitations and roadmap
+
+This version intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis.
+
+The next planned step is a **Valkey-backed durable outbox**, coordinating lifecycle state transitions with queued events and adding retry/recovery behavior. Longer-term plans include enrichment, policy evaluation, and independent incident/notification sinks.
+
+## Repository layout
+
+```text
+cmd/server/          Application entry point
+internal/config/     Environment configuration
+internal/models/     Alertmanager and lifecycle event models
+internal/processor/  Occurrence-aware lifecycle processing
+internal/state/      Redis/Valkey store
+internal/telemetry/  OTLP export, Prometheus metrics, JSON logging
+internal/webhook/    Alertmanager webhook HTTP handler
+docs/redis-debugging.md  Redis/Valkey operational reference
 ```
-
-#### Alerts resolved without a ticket
-
-If there is a ticket_id label:
-    alert.transition:resolved alert.label.ticket_id:""
-
-
-## Processing contract
-
-An occurrence is identified by fingerprint and a nonzero `startsAt`. Comparisons
-use the exact instant with nanosecond precision; timezone offsets do not affect
-identity. Incoming firing and resolved notifications require valid `startsAt`.
-Resolved notifications also require valid nonzero `endsAt >= startsAt`. Unknown
-statuses and missing fingerprints are validation errors. Missing timestamps never
-fall back to the current time. Invalid JSON timestamps fail webhook decoding.
-
-Every valid notification reaches lifecycle processing before emission deduplication.
-The processor reads the current occurrence and applies these rules:
-
-| Stored state | Incoming notification | Occurrence | Processing outcome | Event |
-|---|---|---|---|---|
-| Missing | Firing | Any valid | Opened | Firing, `opened` |
-| Missing | Resolved | Any valid | ResolvedWithoutOpen | Resolved orphan |
-| Firing | Firing | Same startsAt | RepeatedFiring; refresh last_seen_at | None |
-| Firing | Firing | Older startsAt | StaleFiring; unchanged | None |
-| Firing | Firing | Newer startsAt | SupersededFiring; replace occurrence | Firing, `opened` |
-| Firing | Resolved | Same startsAt | Closed | Resolved, `closed` |
-| Firing | Resolved | Older startsAt | StaleResolved; unchanged | None |
-| Firing | Resolved | Newer startsAt | ResolvedWithoutOpen; replace occurrence | Resolved orphan |
-| Closed | Firing | Same or older startsAt | StaleFiring; unchanged | None |
-| Closed | Firing | Newer startsAt | Reopened | Firing, `reopened` |
-| Closed | Resolved | Same startsAt | RepeatedResolved; unchanged | None |
-| Closed | Resolved | Older startsAt | StaleResolved; unchanged | None |
-| Closed | Resolved | Newer startsAt | ResolvedWithoutOpen; replace occurrence | Resolved orphan |
-
-A newer firing supersedes the older open occurrence without synthesizing a
-resolved event. `SupersededFiring` is distinct in the processing result; the OTLP
-event retains `state_write_result=opened`. Newer orphan resolves use their own
-labels and timing, never the previous occurrence's duration or labels. A repeated
-resolve remains the same occurrence even if its valid endsAt differs; the first
-stored closure wins and the tombstone TTL is not refreshed. endsAt is retained
-for resolution timing, not used as occurrence identity.
-
-`Process` returns `ProcessingResult` and an error. `TransitionOccurred` indicates
-a detected lifecycle transition, independently of OTLP delivery. `Event` contains
-the unchanged lifecycle event for transitions and is nil otherwise. An existing
-idempotency key suppresses only emission, not the transition result.
-
-`EventEmissionStatus` is `not_required`, `suppressed`, `failed`, or `accepted`.
-`attempted` is the intermediate status during the emitter call. Accepted means
-only that the emitter returned nil; the OTel SDK batches export asynchronously
-and backend delivery is not confirmed. Validation returns `InvalidNotification`
-and an error before state access. Required state failures return `Indeterminate`
-and an error, with no event or authoritative lifecycle decision. Callers must
-inspect Outcome and error; `TransitionOccurred=false` for Indeterminate does not
-prove that no transition exists.
-
-## State and delivery failure behavior
-
-A failed required state read, SetFiring, SetClosed, or UpdateLastSeen stops
-processing before idempotency and emission. Corrupt stored occurrence data is a
-read failure. The webhook retains its existing error behavior: processing errors
-produce HTTP 500 and the handler continues processing the other alerts in the
-batch. Malformed JSON, including unparseable timestamp strings, produces HTTP
-400. Idempotency SET NX failures remain best effort: log the error and attempt
-emission after successful lifecycle state processing.
-
-The complete occurrence hash is replaced on new firing and closure so obsolete
-labels and endsAt do not leak into a newer occurrence. Redis transactions group
-hash replacement and closure TTL application. These operations do not make the
-entire read/decide/write/emission sequence atomic, and a connection failure can
-leave the client uncertain whether a transaction executed.
-
-State and idempotency keys are still written before OTLP emission. A crash or
-emitter failure after these writes can permanently lose an event: retries can be
-classified as repeats or have emission suppressed. SDK acceptance does not prove
-export. Returning an error on a state failure cannot undo a write that Valkey
-already accepted. Stage 2 must provide durable delivery and coordinate state
-changes with delivery; no durable outbox, rollback, or reliable replay exists yet.
-
-Only the latest occurrence is retained. After tombstone expiry or state loss,
-ordering history is unavailable; delayed firing can look new and late resolution
-can look orphaned. Concurrent processing can race. This stage implements no
-policies, enrichment, incident sinks, or workflow engine.
