@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 
+	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 
 	"github.com/andersh/alertmanager_event_receiver/internal/models"
@@ -33,42 +34,42 @@ func (e *OTelEmitter) Emit(ctx context.Context, event models.LifecycleEvent) err
 		r.SetTimestamp(event.StartsAt)
 	}
 
-	r.SetBody(otellog.StringValue("alert lifecycle event"))
+	r.SetBody(attribute.StringValue("alert lifecycle event"))
 	r.SetSeverity(alertSeverityToOTel(event.Labels["severity"]))
 	r.SetSeverityText(event.Labels["severity"])
 
-	attrs := []otellog.KeyValue{
-		otellog.String("event.kind", event.EventKind),
-		otellog.Int("event.version", event.EventVersion),
-		otellog.String("alert.transition", event.Transition),
-		otellog.String("alert.status", event.Status),
-		otellog.String("alert.fingerprint", event.Fingerprint),
-		otellog.String("alert.fingerprint_source", event.FingerprintSrc),
-		otellog.String("alert.alertname", event.Alertname),
-		otellog.String("alert.starts_at", event.StartsAt.UTC().Format("2006-01-02T15:04:05Z")),
-		otellog.Float64("alert.duration_seconds", event.DurationSeconds),
-		otellog.String("alert.state_write_result", event.StateWriteResult),
-		otellog.String("alert.generator_url", event.GeneratorURL),
-		otellog.String("am.group_key", event.AMGroupKey),
-		otellog.String("am.receiver", event.AMReceiver),
-		otellog.String("am.external_url", event.AMExternalURL),
+	attrs := []attribute.KeyValue{
+		attribute.String("event.kind", event.EventKind),
+		attribute.Int("event.version", event.EventVersion),
+		attribute.String("alert.transition", event.Transition),
+		attribute.String("alert.status", event.Status),
+		attribute.String("alert.fingerprint", event.Fingerprint),
+		attribute.String("alert.fingerprint_source", event.FingerprintSrc),
+		attribute.String("alert.alertname", event.Alertname),
+		attribute.String("alert.starts_at", event.StartsAt.UTC().Format("2006-01-02T15:04:05Z")),
+		attribute.Float64("alert.duration_seconds", event.DurationSeconds),
+		attribute.String("alert.state_write_result", event.StateWriteResult),
+		attribute.String("alert.generator_url", event.GeneratorURL),
+		attribute.String("am.group_key", event.AMGroupKey),
+		attribute.String("am.receiver", event.AMReceiver),
+		attribute.String("am.external_url", event.AMExternalURL),
 	}
 
 	if !event.EndsAt.IsZero() {
-		attrs = append(attrs, otellog.String("alert.ends_at", event.EndsAt.UTC().Format("2006-01-02T15:04:05Z")))
+		attrs = append(attrs, attribute.String("alert.ends_at", event.EndsAt.UTC().Format("2006-01-02T15:04:05Z")))
 	}
 	if event.OrphanReason != "" {
-		attrs = append(attrs, otellog.String("alert.orphan_reason", event.OrphanReason))
+		attrs = append(attrs, attribute.String("alert.orphan_reason", event.OrphanReason))
 	}
 
 	// Flatten labels as alert.label.{key} attributes.
 	for _, k := range sortedKeys(event.Labels) {
-		attrs = append(attrs, otellog.String(fmt.Sprintf("alert.label.%s", k), event.Labels[k]))
+		attrs = append(attrs, attribute.String(fmt.Sprintf("alert.label.%s", k), event.Labels[k]))
 	}
 
 	// Flatten annotations as alert.annotation.{key} attributes.
 	for _, k := range sortedKeys(event.Annotations) {
-		attrs = append(attrs, otellog.String(fmt.Sprintf("alert.annotation.%s", k), event.Annotations[k]))
+		attrs = append(attrs, attribute.String(fmt.Sprintf("alert.annotation.%s", k), event.Annotations[k]))
 	}
 
 	r.AddAttributes(attrs...)
