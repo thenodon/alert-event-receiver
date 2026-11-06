@@ -55,9 +55,22 @@ func (r *RedisStore) GetState(ctx context.Context, fingerprint string) (*AlertSt
 		Alertname: vals["alertname"],
 		Labels:    make(map[string]string),
 	}
-	s.FirstFiringAt, _ = time.Parse(time.RFC3339, vals["first_firing_at"])
-	s.LastSeenAt, _ = time.Parse(time.RFC3339, vals["last_seen_at"])
-	s.StartsAt, _ = time.Parse(time.RFC3339, vals["starts_at"])
+	for field, dest := range map[string]*time.Time{
+		"first_firing_at": &s.FirstFiringAt, "last_seen_at": &s.LastSeenAt,
+		"starts_at": &s.StartsAt, "ends_at": &s.EndsAt,
+	} {
+		parsed, parseErr := time.Parse(time.RFC3339Nano, vals[field])
+		if parseErr != nil {
+			recordRedisOp("get_state", "error", started)
+			return nil, fmt.Errorf("invalid stored %s: %w", field, parseErr)
+		}
+		*dest = parsed
+	}
+	if s.StartsAt.IsZero() || (s.Status != "firing" && s.Status != "closed") ||
+		(s.Status == "closed" && (s.EndsAt.IsZero() || s.EndsAt.Before(s.StartsAt))) {
+		recordRedisOp("get_state", "error", started)
+		return nil, fmt.Errorf("invalid stored alert occurrence")
+	}
 
 	// Labels are stored with a "label." prefix to avoid collisions with state fields.
 	for k, v := range vals {
@@ -78,24 +91,15 @@ func (r *RedisStore) SetFiring(ctx context.Context, fingerprint string, s AlertS
 		recordRedisOp("set_firing", "error", started)
 		return fmt.Errorf("redis HGet %s status: %w", key, err)
 	}
-	fields := map[string]interface{}{
-		"status":          "firing",
-		"first_firing_at": s.FirstFiringAt.UTC().Format(time.RFC3339Nano),
-		"last_seen_at":    s.LastSeenAt.UTC().Format(time.RFC3339Nano),
-		"starts_at":       s.StartsAt.UTC().Format(time.RFC3339Nano),
-		"alertname":       s.Alertname,
-	}
-	for k, v := range s.Labels {
-		fields["label."+k] = v
-	}
-	if err := r.client.HSet(ctx, key, fields).Err(); err != nil {
+	// Replace the complete hash so labels from an older occurrence cannot leak.
+	_, err = r.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx, key)
+		pipe.HSet(ctx, key, stateFields(s, "firing"))
+		return nil
+	})
+	if err != nil {
 		recordRedisOp("set_firing", "error", started)
-		return fmt.Errorf("redis HSet %s: %w", key, err)
-	}
-	// Persist removes the TTL so open alerts don't expire.
-	if err := r.client.Persist(ctx, key).Err(); err != nil {
-		recordRedisOp("set_firing", "error", started)
-		return fmt.Errorf("redis Persist %s: %w", key, err)
+		return fmt.Errorf("redis replace firing %s: %w", key, err)
 	}
 
 	switch prevStatus {
@@ -124,7 +128,7 @@ func (r *RedisStore) UpdateLastSeen(ctx context.Context, fingerprint string, at 
 }
 
 // SetClosed marks the alert closed and applies a TTL tombstone.
-func (r *RedisStore) SetClosed(ctx context.Context, fingerprint string, ttl time.Duration) error {
+func (r *RedisStore) SetClosed(ctx context.Context, fingerprint string, s AlertState, ttl time.Duration) error {
 	started := time.Now()
 	key := stateKey(fingerprint)
 	prevStatus, err := r.client.HGet(ctx, key, "status").Result()
@@ -132,13 +136,15 @@ func (r *RedisStore) SetClosed(ctx context.Context, fingerprint string, ttl time
 		recordRedisOp("set_closed", "error", started)
 		return fmt.Errorf("redis HGet %s status: %w", key, err)
 	}
-	if err := r.client.HSet(ctx, key, "status", "closed").Err(); err != nil {
+	_, err = r.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+		pipe.Del(ctx, key)
+		pipe.HSet(ctx, key, stateFields(s, "closed"))
+		pipe.Expire(ctx, key, ttl)
+		return nil
+	})
+	if err != nil {
 		recordRedisOp("set_closed", "error", started)
-		return fmt.Errorf("redis HSet closed %s: %w", key, err)
-	}
-	if err := r.client.Expire(ctx, key, ttl).Err(); err != nil {
-		recordRedisOp("set_closed", "error", started)
-		return err
+		return fmt.Errorf("redis replace closed %s: %w", key, err)
 	}
 
 	switch prevStatus {
@@ -177,9 +183,9 @@ func (r *RedisStore) CheckAndSetIdempotency(ctx context.Context, key string, ttl
 }
 
 // IdempotencyKey builds a stable idempotency key for a transition.
-// For firing: t = alert.StartsAt. For resolved: t = alert.EndsAt (or now).
+// t is the occurrence startsAt for both firing and resolved.
 func IdempotencyKey(fingerprint, transition string, t time.Time) string {
-	return fmt.Sprintf("%s:%s:%d", fingerprint, transition, t.Unix())
+	return fmt.Sprintf("%s:%s:%s", fingerprint, t.UTC().Format(time.RFC3339Nano), transition)
 }
 
 // FingerprintSource builds the fingerprint_source string from a label map,
@@ -191,4 +197,20 @@ func FingerprintSource(labels map[string]string) string {
 	}
 	sort.Strings(keys)
 	return strings.Join(keys, "+")
+}
+
+func stateFields(s AlertState, status string) map[string]interface{} {
+	fields := map[string]interface{}{
+		"status":          status,
+		"first_firing_at": s.FirstFiringAt.UTC().Format(time.RFC3339Nano),
+		"last_seen_at":    s.LastSeenAt.UTC().Format(time.RFC3339Nano),
+		"starts_at":       s.StartsAt.UTC().Format(time.RFC3339Nano),
+		"ends_at":         s.EndsAt.UTC().Format(time.RFC3339Nano),
+		"alertname":       s.Alertname,
+	}
+	for k, v := range s.Labels {
+		fields["label."+k] = v
+	}
+
+	return fields
 }

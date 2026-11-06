@@ -89,7 +89,7 @@ func TestSetClosed_SetsStatusAndTTL(t *testing.T) {
 	closedBefore := testutil.ToFloat64(telemetry.StateEntries.WithLabelValues("closed"))
 	firingBefore := testutil.ToFloat64(telemetry.StateEntries.WithLabelValues("firing"))
 	opsBefore := testutil.ToFloat64(telemetry.RedisOpsTotal.WithLabelValues("set_closed", "ok"))
-	if err := store.SetClosed(ctx, "fp2", 24*time.Hour); err != nil {
+	if err := store.SetClosed(ctx, "fp2", state.AlertState{StartsAt: now, FirstFiringAt: now, EndsAt: now.Add(time.Minute)}, 24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 
@@ -168,7 +168,7 @@ func TestCheckAndSetIdempotency_DuplicateReturnsFalse(t *testing.T) {
 func TestIdempotencyKey(t *testing.T) {
 	t1 := time.Unix(1700000000, 0)
 	key := state.IdempotencyKey("abc", "firing", t1)
-	expected := "abc:firing:1700000000"
+	expected := "abc:2023-11-14T22:13:20Z:firing"
 	if key != expected {
 		t.Errorf("expected %s, got %s", expected, key)
 	}
@@ -194,7 +194,7 @@ func TestClosedStatePreservesPreciseOccurrenceTiming(t *testing.T) {
 	if err := store.SetFiring(ctx, "precise", state.AlertState{FirstFiringAt: at, StartsAt: at, LastSeenAt: at}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetClosed(ctx, "precise", time.Hour); err != nil {
+	if err := store.SetClosed(ctx, "precise", state.AlertState{StartsAt: at, FirstFiringAt: at, EndsAt: at.Add(time.Minute)}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.GetState(ctx, "precise")
@@ -203,5 +203,88 @@ func TestClosedStatePreservesPreciseOccurrenceTiming(t *testing.T) {
 	}
 	if got == nil || got.Status != "closed" || !got.StartsAt.Equal(at) || !got.FirstFiringAt.Equal(at) {
 		t.Fatalf("occurrence timing lost: %+v", got)
+	}
+}
+
+func TestOccurrenceKeyPrecision(t *testing.T) {
+	at := time.Date(2026, 4, 15, 10, 0, 0, 123456789, time.UTC)
+	key := state.IdempotencyKey("fp", "resolved", at)
+	if key != "fp:2026-04-15T10:00:00.123456789Z:resolved" {
+		t.Fatalf("unexpected key: %s", key)
+	}
+	if key == state.IdempotencyKey("fp", "resolved", at.Add(time.Nanosecond)) {
+		t.Fatal("nanosecond collision")
+	}
+	if key != state.IdempotencyKey("fp", "resolved", at.In(time.FixedZone("offset", 7200))) {
+		t.Fatal("timezone changed occurrence key")
+	}
+	if key == state.IdempotencyKey("fp", "firing", at) {
+		t.Fatal("transition collision")
+	}
+	store, mr := newTestStore(t)
+	if ok, err := store.CheckAndSetIdempotency(context.Background(), key, time.Hour); err != nil || !ok {
+		t.Fatalf("set: %v, %v", ok, err)
+	}
+	if !mr.Exists("alertidemp:" + key) {
+		t.Fatal("wrong Valkey key format")
+	}
+}
+
+func TestCompleteOccurrenceReplacement(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 4, 15, 10, 0, 0, 123456789, time.UTC)
+	old := state.AlertState{StartsAt: at, FirstFiringAt: at, LastSeenAt: at, Labels: map[string]string{"obsolete": "yes"}}
+	if err := store.SetFiring(ctx, "fp", old); err != nil {
+		t.Fatal(err)
+	}
+	newer := state.AlertState{StartsAt: at.Add(time.Nanosecond), FirstFiringAt: at.Add(time.Nanosecond), LastSeenAt: at, EndsAt: at.Add(time.Minute), Labels: map[string]string{"new": "yes"}}
+	if err := store.SetClosed(ctx, "fp", newer, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetState(ctx, "fp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.StartsAt.Equal(newer.StartsAt) || !got.EndsAt.Equal(newer.EndsAt) || got.Labels["obsolete"] != "" || got.Labels["new"] != "yes" || mr.TTL("alertstate:fp") <= 0 {
+		t.Fatalf("incorrect closed occurrence: %+v", got)
+	}
+	newer.StartsAt = newer.EndsAt.Add(time.Nanosecond)
+	newer.EndsAt = time.Time{}
+	if err := store.SetFiring(ctx, "fp", newer); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetState(ctx, "fp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.EndsAt.IsZero() || mr.TTL("alertstate:fp") != 0 {
+		t.Fatalf("reopen retained closure or TTL: %+v", got)
+	}
+}
+
+func TestRedisOperationFailures(t *testing.T) {
+	store, mr := newTestStore(t)
+	ctx := context.Background()
+	mr.SetError("ERR unavailable")
+	if _, err := store.GetState(ctx, "fp"); err == nil {
+		t.Fatal("expected read error")
+	}
+	if err := store.SetFiring(ctx, "fp", state.AlertState{}); err == nil {
+		t.Fatal("expected firing error")
+	}
+	if err := store.SetClosed(ctx, "fp", state.AlertState{}, time.Hour); err == nil {
+		t.Fatal("expected close error")
+	}
+	if err := store.UpdateLastSeen(ctx, "fp", time.Now()); err == nil {
+		t.Fatal("expected refresh error")
+	}
+}
+
+func TestMalformedStoredOccurrenceFailsRead(t *testing.T) {
+	store, mr := newTestStore(t)
+	mr.HSet("alertstate:fp", "status", "firing", "starts_at", "malformed")
+	if _, err := store.GetState(context.Background(), "fp"); err == nil {
+		t.Fatal("expected corrupt state read failure")
 	}
 }

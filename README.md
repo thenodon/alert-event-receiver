@@ -35,8 +35,8 @@ Alertmanager (send_resolved: true)
 alert-event-receiver
   ├─ reads alert.Fingerprint as fingerprint identity key
   ├─ checks Redis / Valkey for state
-  ├─ emits OTLP log record (firing | resolved)
-  └─ updates state in Redis / Valkey
+  ├─ processes occurrence and updates state in Redis / Valkey
+  └─ deduplicates lifecycle event emission, then emits OTLP (firing | resolved)
       │
       │  OTLP/gRPC or OTLP/HTTP
       ▼
@@ -106,8 +106,8 @@ Fields currently stored:
 
 - `status` → `firing` or `closed`
 - `first_firing_at` → first known firing timestamp for the current lifecycle
-- `last_seen_at` → last time a firing notification was seen
-- `starts_at` → Alertmanager `startsAt` value
+- `last_seen_at` → last time a firing notification was seen- `starts_at` → Alertmanager `startsAt` occurrence identity (RFC3339Nano)
+- `ends_at` → resolution time for a closed occurrence; zero for firing
 - `alertname` → copied from alert labels
 - `label.*` → every alert label is stored with a `label.` prefix
 
@@ -127,7 +127,7 @@ label.instance=checkout-7d8f9
 Behavior:
 
 - When an alert is `firing`, the hash is written/updated and made persistent.
-- When an alert is `resolved`, occurrence timing is retained and the same hash is marked `status=closed` and a TTL is applied using `CLOSED_STATE_TTL`.
+- When an alert is `resolved`, the complete closed occurrence is written with `status=closed` and a TTL is applied using `CLOSED_STATE_TTL`.
 - That short-lived closed tombstone prevents duplicate late `resolved` deliveries from creating extra resolved events.
 
 ## Idempotency keys
@@ -135,14 +135,14 @@ Behavior:
 One short-lived string key per transition delivery:
 
 ```text
-alertidemp:{fingerprint}:{transition}:{unix_timestamp}
+alertidemp:{fingerprint}:{startsAt}:{transition}
 ```
 
 Examples:
 
 ```text
-alertidemp:4a4f0d2b7c9e1a23:firing:1776244978
-alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061
+alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing
+alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved
 ```
 
 Behavior:
@@ -154,7 +154,7 @@ Behavior:
 
 ## Deduplication and TTL behavior
 
-Deduplication happens in two layers:
+Deduplication uses identity, lifecycle state, and emission keys:
 
 ### 1. Identity: alert fingerprint
 
@@ -171,13 +171,14 @@ That means:
 For each transition, the receiver creates an idempotency key:
 
 ```text
-alertidemp:{fingerprint}:{transition}:{unix_timestamp}
+alertidemp:{fingerprint}:{startsAt}:{transition}
 ```
 
 Timestamp source:
 
-- `firing` → `startsAt` (or `now` if missing)
-- `resolved` → `endsAt` (or `now` if missing)
+- Both transitions use the occurrence `startsAt`, encoded as canonical UTC RFC3339Nano.
+- `endsAt` is excluded; distinct occurrences within the same second have distinct keys.
+- No legacy-key compatibility or migration is provided.
 
 The key is written with `SET NX`:
 
@@ -190,7 +191,7 @@ This protects against webhook retries and repeated deliveries for the same trans
 
 The receiver also uses the alert state hash to suppress repeated lifecycle events:
 
-- if state is already `firing` and another `firing` arrives, no new event is emitted
+- if the same occurrence is already `firing`, another `firing` refreshes last_seen_at without an event; older occurrences are stale and newer ones supersede it
 - if state is `closed`, a firing notification reopens it only when both stored and incoming `startsAt` are known and incoming `startsAt` is strictly newer
 - if a `resolved` arrives without matching open state, the receiver still emits a resolved orphan event and writes a short-lived closed tombstone
 
@@ -238,7 +239,7 @@ If you decrease it:
 
 Applies to:
 
-- `alertidemp:{fingerprint}:{transition}:{unix_timestamp}`
+- `alertidemp:{fingerprint}:{startsAt}:{transition}`
 
 Default:
 
@@ -330,8 +331,8 @@ redis-cli --scan --pattern 'alertidemp:*'
 ### Inspect one idempotency key
 
 ```bash
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
+redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
+redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
 ```
 
 ### Find all keys for one fingerprint
@@ -380,15 +381,15 @@ The example below shows a minimal lifecycle for one alert fingerprint.
 Expected Redis writes:
 
 - `alertstate:4a4f0d2b7c9e1a23` hash with `status=firing` and `label.*` fields
-- `alertidemp:4a4f0d2b7c9e1a23:firing:1776244978` with value `1` and `IDEMPOTENCY_TTL`
+- `alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing` with value `1` and `IDEMPOTENCY_TTL`
 
 Inspect with `redis-cli`:
 
 ```bash
 redis-cli HGETALL 'alertstate:4a4f0d2b7c9e1a23'
 redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:firing:1776244978'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:firing:1776244978'
+redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing'
+redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:firing'
 ```
 
 At this point, state key TTL should usually be `-1` (open alert, persisted).
@@ -421,18 +422,18 @@ Expected Redis writes/updates:
 
 - `alertstate:4a4f0d2b7c9e1a23` updated to `status=closed`
 - `alertstate:*` gets a TTL from `CLOSED_STATE_TTL`
-- `alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061` with value `1` and `IDEMPOTENCY_TTL`
+- `alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved` with value `1` and `IDEMPOTENCY_TTL`
 
 Inspect with `redis-cli`:
 
 ```bash
 redis-cli HMGET 'alertstate:4a4f0d2b7c9e1a23' status first_firing_at last_seen_at starts_at alertname
 redis-cli TTL 'alertstate:4a4f0d2b7c9e1a23'
-redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
-redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
+redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
+redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:2026-04-15T09:22:58Z:resolved'
 ```
 
-If you send the exact same notification again, lifecycle processing runs again. Repeated firing refreshes `last_seen_at`; repeated resolved leaves the tombstone unchanged. Neither generates another event.
+If you send the exact same notification again, lifecycle processing runs again. Repeated firing for the same occurrence refreshes `last_seen_at`; repeated resolved leaves the tombstone unchanged. Neither generates another event.
 
 ## Troubleshooting notes
 
@@ -577,38 +578,80 @@ If there is a ticket_id label:
     alert.transition:resolved alert.label.ticket_id:""
 
 
-## Stage 1 processing contract and delivery limitations
+## Processing contract
 
-Every notification reaches lifecycle processing before emission deduplication.
-`Process` returns a `ProcessingResult` and an error. `Outcome` identifies opened,
-repeated firing, closed, repeated resolved, reopened, stale firing, or resolved
-without open state. `TransitionOccurred` means a detected lifecycle transition,
-independently of successful state persistence or OTLP delivery. `Event` contains
-the unchanged lifecycle event for a detected transition and is nil otherwise.
+An occurrence is identified by fingerprint and a nonzero `startsAt`. Comparisons
+use the exact instant with nanosecond precision; timezone offsets do not affect
+identity. Incoming firing and resolved notifications require valid `startsAt`.
+Resolved notifications also require valid nonzero `endsAt >= startsAt`. Unknown
+statuses and missing fingerprints are validation errors. Missing timestamps never
+fall back to the current time. Invalid JSON timestamps fail webhook decoding.
 
-`EventEmissionStatus` is `not_required` for notifications without a transition,
-`suppressed` when an existing idempotency key prevents emission, `failed` when
-the emitter returns an error, or `accepted` when it returns nil. `attempted` is
-the intermediate status during the emitter call. Accepted means emitter acceptance
-only: the current OTel emitter enqueues through the SDK and does not confirm
-backend delivery. The webhook HTTP response continues to depend on the error.
+Every valid notification reaches lifecycle processing before emission deduplication.
+The processor reads the current occurrence and applies these rules:
 
-A closed occurrence reopens only when incoming `startsAt` is strictly newer than
-the stored `startsAt`. Older or identical timestamps return stale firing. If
-either timestamp is missing, the conservative choice is to retain closed state;
-a genuine reopen cannot be established. Closed state retains occurrence timing,
-including for orphan resolves. Redis timestamps retain fractional seconds and
-remain compatible with existing RFC3339 values. Repeated resolved notifications
-do not emit events or extend the closed tombstone TTL.
+| Stored state | Incoming notification | Occurrence | Processing outcome | Event |
+|---|---|---|---|---|
+| Missing | Firing | Any valid | Opened | Firing, `opened` |
+| Missing | Resolved | Any valid | ResolvedWithoutOpen | Resolved orphan |
+| Firing | Firing | Same startsAt | RepeatedFiring; refresh last_seen_at | None |
+| Firing | Firing | Older startsAt | StaleFiring; unchanged | None |
+| Firing | Firing | Newer startsAt | SupersededFiring; replace occurrence | Firing, `opened` |
+| Firing | Resolved | Same startsAt | Closed | Resolved, `closed` |
+| Firing | Resolved | Older startsAt | StaleResolved; unchanged | None |
+| Firing | Resolved | Newer startsAt | ResolvedWithoutOpen; replace occurrence | Resolved orphan |
+| Closed | Firing | Same or older startsAt | StaleFiring; unchanged | None |
+| Closed | Firing | Newer startsAt | Reopened | Firing, `reopened` |
+| Closed | Resolved | Same startsAt | RepeatedResolved; unchanged | None |
+| Closed | Resolved | Older startsAt | StaleResolved; unchanged | None |
+| Closed | Resolved | Newer startsAt | ResolvedWithoutOpen; replace occurrence | Resolved orphan |
+
+A newer firing supersedes the older open occurrence without synthesizing a
+resolved event. `SupersededFiring` is distinct in the processing result; the OTLP
+event retains `state_write_result=opened`. Newer orphan resolves use their own
+labels and timing, never the previous occurrence's duration or labels. A repeated
+resolve remains the same occurrence even if its valid endsAt differs; the first
+stored closure wins and the tombstone TTL is not refreshed. endsAt is retained
+for resolution timing, not used as occurrence identity.
+
+`Process` returns `ProcessingResult` and an error. `TransitionOccurred` indicates
+a detected lifecycle transition, independently of OTLP delivery. `Event` contains
+the unchanged lifecycle event for transitions and is nil otherwise. An existing
+idempotency key suppresses only emission, not the transition result.
+
+`EventEmissionStatus` is `not_required`, `suppressed`, `failed`, or `accepted`.
+`attempted` is the intermediate status during the emitter call. Accepted means
+only that the emitter returned nil; the OTel SDK batches export asynchronously
+and backend delivery is not confirmed. Validation returns `InvalidNotification`
+and an error before state access. Required state failures return `Indeterminate`
+and an error, with no event or authoritative lifecycle decision. Callers must
+inspect Outcome and error; `TransitionOccurred=false` for Indeterminate does not
+prove that no transition exists.
+
+## State and delivery failure behavior
+
+A failed required state read, SetFiring, SetClosed, or UpdateLastSeen stops
+processing before idempotency and emission. Corrupt stored occurrence data is a
+read failure. The webhook retains its existing error behavior: processing errors
+produce HTTP 500 and the handler continues processing the other alerts in the
+batch. Malformed JSON, including unparseable timestamp strings, produces HTTP
+400. Idempotency SET NX failures remain best effort: log the error and attempt
+emission after successful lifecycle state processing.
+
+The complete occurrence hash is replaced on new firing and closure so obsolete
+labels and endsAt do not leak into a newer occurrence. Redis transactions group
+hash replacement and closure TTL application. These operations do not make the
+entire read/decide/write/emission sequence atomic, and a connection failure can
+leave the client uncertain whether a transaction executed.
 
 State and idempotency keys are still written before OTLP emission. A crash or
-emission failure after these writes can permanently lose an event: a retry can
-be classified as repeated or have emission suppressed by the existing key.
-SDK acceptance also does not guarantee export. There is no durable outbox,
-rollback, or reliable replay in Stage 1; delivery reliability belongs to Stage 2.
+emitter failure after these writes can permanently lose an event: retries can be
+classified as repeats or have emission suppressed. SDK acceptance does not prove
+export. Returning an error on a state failure cannot undo a write that Valkey
+already accepted. Stage 2 must provide durable delivery and coordinate state
+changes with delivery; no durable outbox, rollback, or reliable replay exists yet.
 
-Deduplication remains bounded by state and idempotency TTLs. After closed state
-expires, occurrence history is unavailable, so a delayed firing may look new;
-a late resolve may look orphaned. State read/write errors retain the existing
-best-effort behavior. Concurrent lifecycle decisions are not atomic. This stage
-adds no policy engine, enrichment, incident sinks, or workflows.
+Only the latest occurrence is retained. After tombstone expiry or state loss,
+ordering history is unavailable; delayed firing can look new and late resolution
+can look orphaned. Concurrent processing can race. This stage implements no
+policies, enrichment, incident sinks, or workflow engine.
