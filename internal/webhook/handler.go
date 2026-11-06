@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/andersh/alertmanager_event_receiver/internal/models"
+	"github.com/andersh/alertmanager_event_receiver/internal/processor"
 	"github.com/andersh/alertmanager_event_receiver/internal/telemetry"
 )
 
 // AlertProcessor processes a single alert instance.
 type AlertProcessor interface {
-	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) error
+	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (processor.ProcessingResult, error)
 }
 
 // Handler is the HTTP handler for Alertmanager webhook deliveries.
@@ -55,16 +56,34 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A grouped webhook can contain both firing and resolved alerts, so report
+	// individual alert counts as well as Alertmanager's group status.
+	firingCount, resolvedCount, unknownStatusCount := 0, 0, 0
+	for _, alert := range payload.Alerts {
+		switch alert.Status {
+		case models.TransitionFiring:
+			firingCount++
+		case models.TransitionResolved:
+			resolvedCount++
+		default:
+			unknownStatusCount++
+		}
+	}
+
 	h.logger.InfoContext(r.Context(), "webhook received",
 		slog.String("group_key", payload.GroupKey),
 		slog.String("receiver", payload.Receiver),
+		slog.String("status", payload.Status),
 		slog.Int("alert_count", len(payload.Alerts)),
+		slog.Int("firing_count", firingCount),
+		slog.Int("resolved_count", resolvedCount),
+		slog.Int("unknown_status_count", unknownStatusCount),
 	)
 
 	ctx := r.Context()
 	hadError := false
 	for _, alert := range payload.Alerts {
-		if err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
+		if _, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
 			h.logger.ErrorContext(ctx, "failed to process alert",
 				slog.String("fingerprint", alert.Fingerprint),
 				slog.String("alertname", alert.Labels["alertname"]),
@@ -95,4 +114,3 @@ func statusClass(code int) string {
 		return "2xx"
 	}
 }
-

@@ -36,27 +36,138 @@ func New(store state.Store, emitter EventEmitter, closedTTL, idempTTL time.Durat
 	}
 }
 
-// Process handles a single alert from an Alertmanager webhook payload.
-// groupKey, receiver and externalURL come from the outer webhook payload.
-func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) error {
-	// Build the idempotency timestamp.
-	// For firing: use startsAt (stable across repeated AM notifications for the same cycle).
-	// For resolved: use endsAt if set, otherwise fall back to now.
-	var idempTime time.Time
-	switch alert.Status {
-	case models.TransitionFiring:
-		idempTime = alert.StartsAt
-		if idempTime.IsZero() {
-			idempTime = time.Now()
+// Process handles every notification before emission deduplication. A result with
+// Outcome Indeterminate is not an authoritative lifecycle decision.
+func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (ProcessingResult, error) {
+	if err := validate(alert); err != nil {
+		return ProcessingResult{Outcome: InvalidNotification, EventEmissionStatus: EmissionNotRequired}, err
+	}
+	current, err := p.store.GetState(ctx, alert.Fingerprint)
+	if err != nil {
+		return p.stateFailure(ctx, "get_state", err)
+	}
+	if current != nil && (current.StartsAt.IsZero() || (current.Status != "firing" && current.Status != "closed")) {
+		return p.stateFailure(ctx, "get_state", fmt.Errorf("invalid stored occurrence"))
+	}
+	if current != nil && alert.StartsAt.Before(current.StartsAt) {
+		outcome := StaleFiring
+		if alert.Status == models.TransitionResolved {
+			outcome = StaleResolved
 		}
-	default:
-		idempTime = alert.EndsAt
-		if idempTime.IsZero() {
-			idempTime = time.Now()
+		return noTransition(outcome), nil
+	}
+	same := current != nil && alert.StartsAt.Equal(current.StartsAt)
+	if same && current.Status == "closed" {
+		if alert.Status == models.TransitionResolved {
+			return noTransition(RepeatedResolved), nil
+		}
+		return noTransition(StaleFiring), nil
+	}
+	if same && alert.Status == models.TransitionFiring {
+		if err := p.store.UpdateLastSeen(ctx, alert.Fingerprint, time.Now()); err != nil {
+			return p.stateFailure(ctx, "update_last_seen", err)
+		}
+		telemetry.StateWritesTotal.WithLabelValues(models.StateAlreadyFiring).Inc()
+		return noTransition(RepeatedFiring), nil
+	}
+	now := time.Now()
+	next := state.AlertState{Status: alert.Status, StartsAt: alert.StartsAt,
+		FirstFiringAt: alert.StartsAt, LastSeenAt: now,
+		Alertname: alert.Labels["alertname"], Labels: alert.Labels}
+	event := models.LifecycleEvent{
+		EventKind: "alert_transition", EventVersion: 1,
+		Transition: alert.Status, Status: alert.Status, Fingerprint: alert.Fingerprint,
+		FingerprintSrc: state.FingerprintSource(alert.Labels), Alertname: next.Alertname,
+		Labels: alert.Labels, Annotations: alert.Annotations, StartsAt: alert.StartsAt,
+		GeneratorURL: alert.GeneratorURL, AMGroupKey: groupKey,
+		AMReceiver: receiver, AMExternalURL: externalURL,
+	}
+	outcome := Opened
+	if alert.Status == models.TransitionFiring {
+		event.StateWriteResult = models.StateOpened
+		if current != nil {
+			if current.Status == "closed" {
+				outcome = Reopened
+				event.StateWriteResult = models.StateReopened
+			} else {
+				outcome = SupersededFiring
+			}
+		}
+		if err := p.store.SetFiring(ctx, alert.Fingerprint, next); err != nil {
+			return p.stateFailure(ctx, "set_firing", err)
+		}
+	} else {
+		outcome = ResolvedWithoutOpen
+		event.StateWriteResult = models.StateResolvedWithoutOpen
+		event.OrphanReason = "open_state_missing"
+		if same {
+			outcome = Closed
+			event.StateWriteResult = models.StateClosed
+			event.OrphanReason = ""
+			next.FirstFiringAt = current.FirstFiringAt
+			next.LastSeenAt = current.LastSeenAt
+			if len(current.Labels) > 0 {
+				next.Labels = current.Labels
+				next.Alertname = current.Alertname
+			}
+		}
+		next.Status = "closed"
+		next.EndsAt = alert.EndsAt
+		event.EndsAt = alert.EndsAt
+		event.DurationSeconds = alert.EndsAt.Sub(alert.StartsAt).Seconds()
+		event.Labels = next.Labels
+		event.Alertname = next.Alertname
+		if err := p.store.SetClosed(ctx, alert.Fingerprint, next, p.closedStateTTL); err != nil {
+			return p.stateFailure(ctx, "set_closed", err)
+		}
+		if !same {
+			telemetry.ResolvedOrphansTotal.Inc()
 		}
 	}
+	telemetry.StateWritesTotal.WithLabelValues(event.StateWriteResult).Inc()
+	return p.emit(ctx, alert, event, outcome)
+}
 
-	idempKey := state.IdempotencyKey(alert.Fingerprint, alert.Status, idempTime)
+func validate(alert models.Alert) error {
+	if alert.Status != models.TransitionFiring && alert.Status != models.TransitionResolved {
+		return fmt.Errorf("invalid alert status %q", alert.Status)
+	}
+	if alert.Fingerprint == "" {
+		return fmt.Errorf("fingerprint is required")
+	}
+	if alert.StartsAt.IsZero() {
+		return fmt.Errorf("startsAt is required")
+	}
+	if _, err := alert.StartsAt.MarshalText(); err != nil {
+		return fmt.Errorf("invalid startsAt: %w", err)
+	}
+	if alert.Status == models.TransitionResolved {
+		if alert.EndsAt.IsZero() {
+			return fmt.Errorf("endsAt is required for resolved alerts")
+		}
+		if _, err := alert.EndsAt.MarshalText(); err != nil {
+			return fmt.Errorf("invalid endsAt: %w", err)
+		}
+		if alert.EndsAt.Before(alert.StartsAt) {
+			return fmt.Errorf("endsAt must be >= startsAt")
+		}
+	}
+	return nil
+}
+
+func noTransition(outcome Outcome) ProcessingResult {
+	return ProcessingResult{Outcome: outcome, EventEmissionStatus: EmissionNotRequired}
+}
+
+func (p *Processor) stateFailure(ctx context.Context, operation string, err error) (ProcessingResult, error) {
+	p.logger.ErrorContext(ctx, "required state operation failed", slog.String("operation", operation), slog.Any("error", err))
+	return noTransition(Indeterminate), fmt.Errorf("%s: %w", operation, err)
+}
+
+// emit applies delivery deduplication only after lifecycle processing has completed.
+func (p *Processor) emit(ctx context.Context, alert models.Alert, event models.LifecycleEvent, outcome Outcome) (ProcessingResult, error) {
+	result := ProcessingResult{Outcome: outcome, TransitionOccurred: true, Event: &event, EventEmissionStatus: EmissionAttempted}
+	idempKey := state.IdempotencyKey(alert.Fingerprint, alert.Status, alert.StartsAt)
 	isNew, err := p.store.CheckAndSetIdempotency(ctx, idempKey, p.idempTTL)
 	if err != nil {
 		// Log and continue: on idempotency failure we prefer emitting over silently dropping.
@@ -67,202 +178,24 @@ func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, r
 		)
 		telemetry.RedisErrors.WithLabelValues("idempotency").Inc()
 	} else if !isNew {
-		p.logger.InfoContext(ctx, "duplicate event dropped",
+		p.logger.InfoContext(ctx, "lifecycle event emission suppressed",
 			slog.String("fingerprint", alert.Fingerprint),
 			slog.String("transition", alert.Status),
 		)
 		telemetry.DuplicatesDropped.Inc()
-		return nil
+		result.EventEmissionStatus = EmissionSuppressed
+		return result, nil
 	}
 	if err == nil && isNew {
 		telemetry.IdempotencyKeysCreatedTotal.WithLabelValues(alert.Status).Inc()
 	}
 
-	fingerprintSrc := state.FingerprintSource(alert.Labels)
-
-	if alert.Status == models.TransitionFiring {
-		return p.onFiring(ctx, alert, fingerprintSrc, groupKey, receiver, externalURL)
-	}
-	return p.onResolved(ctx, alert, fingerprintSrc, groupKey, receiver, externalURL)
-}
-
-func (p *Processor) onFiring(
-	ctx context.Context,
-	alert models.Alert,
-	fingerprintSrc, groupKey, receiver, externalURL string,
-) error {
-	current, err := p.store.GetState(ctx, alert.Fingerprint)
-	if err != nil {
-		p.logger.ErrorContext(ctx, "state read failed",
-			slog.String("fingerprint", alert.Fingerprint), slog.Any("error", err))
-		telemetry.RedisErrors.WithLabelValues("get_state").Inc()
-		// Continue: absence of state is treated as "none" — safe to open.
-	}
-
-	// Transition: open ──firing──> open (no new event, just refresh last_seen_at)
-	if current != nil && current.Status == "firing" {
-		if err := p.store.UpdateLastSeen(ctx, alert.Fingerprint, time.Now()); err != nil {
-			p.logger.WarnContext(ctx, "failed to update last_seen_at",
-				slog.String("fingerprint", alert.Fingerprint), slog.Any("error", err))
-			telemetry.RedisErrors.WithLabelValues("update_last_seen").Inc()
-		}
-		telemetry.StateWritesTotal.WithLabelValues(models.StateAlreadyFiring).Inc()
-		return nil
-	}
-
-	// Transitions:
-	//   none    ──firing──> open  (stateResult = opened)
-	//   closed  ──firing──> open  (stateResult = reopened)
-	stateResult := models.StateOpened
-	if current != nil && current.Status == "closed" {
-		stateResult = models.StateReopened
-	}
-	telemetry.StateWritesTotal.WithLabelValues(stateResult).Inc()
-
-	firstFiring := alert.StartsAt
-	if firstFiring.IsZero() {
-		firstFiring = time.Now()
-	}
-	now := time.Now()
-
-	if err := p.store.SetFiring(ctx, alert.Fingerprint, state.AlertState{
-		Status:        "firing",
-		FirstFiringAt: firstFiring,
-		LastSeenAt:    now,
-		StartsAt:      alert.StartsAt,
-		Alertname:     alert.Labels["alertname"],
-		Labels:        alert.Labels,
-	}); err != nil {
-		p.logger.ErrorContext(ctx, "state write failed",
-			slog.String("fingerprint", alert.Fingerprint), slog.Any("error", err))
-		telemetry.RedisErrors.WithLabelValues("set_firing").Inc()
-		// Continue to emit the event even if state write failed.
-	}
-
-	event := models.LifecycleEvent{
-		EventKind:        "alert_transition",
-		EventVersion:     1,
-		Transition:       models.TransitionFiring,
-		Status:           models.TransitionFiring,
-		Fingerprint:      alert.Fingerprint,
-		FingerprintSrc:   fingerprintSrc,
-		Alertname:        alert.Labels["alertname"],
-		Labels:           alert.Labels,
-		Annotations:      alert.Annotations,
-		StartsAt:         alert.StartsAt,
-		DurationSeconds:  0,
-		GeneratorURL:     alert.GeneratorURL,
-		AMGroupKey:       groupKey,
-		AMReceiver:       receiver,
-		AMExternalURL:    externalURL,
-		StateWriteResult: stateResult,
-	}
-
 	if err := p.emitter.Emit(ctx, event); err != nil {
-		p.logger.ErrorContext(ctx, "OTLP emit failed",
-			slog.String("fingerprint", alert.Fingerprint),
-			slog.String("transition", "firing"),
-			slog.Any("error", err),
-		)
-		telemetry.EmitErrors.WithLabelValues("firing").Inc()
-		return fmt.Errorf("emit firing event: %w", err)
+		result.EventEmissionStatus = EmissionFailed
+		telemetry.EmitErrors.WithLabelValues(event.Transition).Inc()
+		return result, fmt.Errorf("emit %s event: %w", event.Transition, err)
 	}
-
-	telemetry.EventsEmitted.WithLabelValues("firing").Inc()
-	return nil
+	result.EventEmissionStatus = EmissionAccepted
+	telemetry.EventsEmitted.WithLabelValues(event.Transition).Inc()
+	return result, nil
 }
-
-func (p *Processor) onResolved(
-	ctx context.Context,
-	alert models.Alert,
-	fingerprintSrc, groupKey, receiver, externalURL string,
-) error {
-	current, err := p.store.GetState(ctx, alert.Fingerprint)
-	if err != nil {
-		p.logger.ErrorContext(ctx, "state read failed",
-			slog.String("fingerprint", alert.Fingerprint), slog.Any("error", err))
-		telemetry.RedisErrors.WithLabelValues("get_state").Inc()
-	}
-
-	// Determine start time: prefer stored first_firing_at, fall back to payload.
-	var startTime time.Time
-	if current != nil && !current.FirstFiringAt.IsZero() {
-		startTime = current.FirstFiringAt
-	} else if !alert.StartsAt.IsZero() {
-		startTime = alert.StartsAt
-	} else {
-		startTime = time.Now()
-	}
-
-	endTime := alert.EndsAt
-	if endTime.IsZero() {
-		endTime = time.Now()
-	}
-
-	duration := endTime.Sub(startTime).Seconds()
-	if duration < 0 {
-		duration = 0
-	}
-
-	// Determine state result and orphan status.
-	stateResult := models.StateClosed
-	orphanReason := ""
-	if current == nil || current.Status == "closed" {
-		stateResult = models.StateResolvedWithoutOpen
-		orphanReason = "open_state_missing"
-		telemetry.ResolvedOrphansTotal.Inc()
-		p.logger.WarnContext(ctx, "resolved event received without matching open state",
-			slog.String("fingerprint", alert.Fingerprint),
-			slog.String("alertname", alert.Labels["alertname"]),
-		)
-	}
-	telemetry.StateWritesTotal.WithLabelValues(stateResult).Inc()
-
-	// Write closed tombstone regardless — prevents duplicate orphan events too.
-	if err := p.store.SetClosed(ctx, alert.Fingerprint, p.closedStateTTL); err != nil {
-		p.logger.ErrorContext(ctx, "state close failed",
-			slog.String("fingerprint", alert.Fingerprint), slog.Any("error", err))
-		telemetry.RedisErrors.WithLabelValues("set_closed").Inc()
-	}
-
-	// Prefer labels from stored state (more reliable for long-running alerts).
-	labels := alert.Labels
-	if current != nil && len(current.Labels) > 0 {
-		labels = current.Labels
-	}
-
-	event := models.LifecycleEvent{
-		EventKind:        "alert_transition",
-		EventVersion:     1,
-		Transition:       models.TransitionResolved,
-		Status:           models.TransitionResolved,
-		Fingerprint:      alert.Fingerprint,
-		FingerprintSrc:   fingerprintSrc,
-		Alertname:        labels["alertname"],
-		Labels:           labels,
-		Annotations:      alert.Annotations,
-		StartsAt:         startTime,
-		EndsAt:           endTime,
-		DurationSeconds:  duration,
-		GeneratorURL:     alert.GeneratorURL,
-		AMGroupKey:       groupKey,
-		AMReceiver:       receiver,
-		AMExternalURL:    externalURL,
-		StateWriteResult: stateResult,
-		OrphanReason:     orphanReason,
-	}
-
-	if err := p.emitter.Emit(ctx, event); err != nil {
-		p.logger.ErrorContext(ctx, "OTLP emit failed",
-			slog.String("fingerprint", alert.Fingerprint),
-			slog.String("transition", "resolved"),
-			slog.Any("error", err),
-		)
-		telemetry.EmitErrors.WithLabelValues("resolved").Inc()
-		return fmt.Errorf("emit resolved event: %w", err)
-	}
-
-	telemetry.EventsEmitted.WithLabelValues("resolved").Inc()
-	return nil
-}
-

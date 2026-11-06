@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/andersh/alertmanager_event_receiver/internal/models"
+	"github.com/andersh/alertmanager_event_receiver/internal/processor"
 	"github.com/andersh/alertmanager_event_receiver/internal/webhook"
 )
 
@@ -23,9 +24,9 @@ type mockProcessor struct {
 	err   error
 }
 
-func (m *mockProcessor) Process(_ context.Context, alert models.Alert, _, _, _ string) error {
+func (m *mockProcessor) Process(_ context.Context, alert models.Alert, _, _, _ string) (processor.ProcessingResult, error) {
 	m.calls = append(m.calls, alert)
-	return m.err
+	return processor.ProcessingResult{}, m.err
 }
 
 func newHandler(p *mockProcessor) http.Handler {
@@ -137,4 +138,3 @@ func TestWebhook_EmptyAlerts_Returns200(t *testing.T) {
 		t.Errorf("expected 0 processed alerts, got %d", len(proc.calls))
 	}
 }
-
