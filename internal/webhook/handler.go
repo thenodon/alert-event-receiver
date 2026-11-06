@@ -56,10 +56,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A grouped webhook can contain both firing and resolved alerts, so report
+	// individual alert counts as well as Alertmanager's group status.
+	firingCount, resolvedCount, unknownStatusCount := 0, 0, 0
+	for _, alert := range payload.Alerts {
+		switch alert.Status {
+		case models.TransitionFiring:
+			firingCount++
+		case models.TransitionResolved:
+			resolvedCount++
+		default:
+			unknownStatusCount++
+		}
+	}
+
 	h.logger.InfoContext(r.Context(), "webhook received",
 		slog.String("group_key", payload.GroupKey),
 		slog.String("receiver", payload.Receiver),
+		slog.String("status", payload.Status),
 		slog.Int("alert_count", len(payload.Alerts)),
+		slog.Int("firing_count", firingCount),
+		slog.Int("resolved_count", resolvedCount),
+		slog.Int("unknown_status_count", unknownStatusCount),
 	)
 
 	ctx := r.Context()
