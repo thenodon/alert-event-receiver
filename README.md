@@ -571,7 +571,7 @@ _time:7d alert.transition:resolved
 | sort by (avg_duration desc)
 ```
 
-#### Alerts resolved without ticket
+#### Alerts resolved without a ticket
 
 If there is a ticket_id label:
     alert.transition:resolved alert.label.ticket_id:""
