@@ -15,7 +15,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26'
+          go-version: '1.26.10'
       - name: Build
         run: go build -ldflags "-X cmd.server.main.version=${GITHUB_REF_NAME}" -o alert_event_receiver ./cmd/server
       - name: Create GitHub Release
