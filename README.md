@@ -127,7 +127,7 @@ label.instance=checkout-7d8f9
 Behavior:
 
 - When an alert is `firing`, the hash is written/updated and made persistent.
-- When an alert is `resolved`, the same hash is marked `status=closed` and a TTL is applied using `CLOSED_STATE_TTL`.
+- When an alert is `resolved`, occurrence timing is retained and the same hash is marked `status=closed` and a TTL is applied using `CLOSED_STATE_TTL`.
 - That short-lived closed tombstone prevents duplicate late `resolved` deliveries from creating extra resolved events.
 
 ## Idempotency keys
@@ -148,7 +148,7 @@ alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061
 Behavior:
 
 - The key is written with Redis `SET NX`.
-- If it already exists, the receiver treats the delivery as a duplicate and drops it.
+- If it already exists, only lifecycle event emission is suppressed; lifecycle processing still runs.
 - The TTL is controlled by `IDEMPOTENCY_TTL`.
 - The stored value is currently just `1`; the key name carries the useful information.
 
@@ -181,8 +181,8 @@ Timestamp source:
 
 The key is written with `SET NX`:
 
-- if the key is new, the event is processed
-- if the key already exists, the event is dropped as a duplicate delivery
+- if the key is new, the detected lifecycle event is emitted
+- if the key already exists, event emission is suppressed; the processing result still reports the detected transition
 
 This protects against webhook retries and repeated deliveries for the same transition.
 
@@ -191,7 +191,7 @@ This protects against webhook retries and repeated deliveries for the same trans
 The receiver also uses the alert state hash to suppress repeated lifecycle events:
 
 - if state is already `firing` and another `firing` arrives, no new event is emitted
-- if state is `closed` and a new `firing` arrives, that is treated as a new cycle and a new firing event is emitted
+- if state is `closed`, a firing notification reopens it only when both stored and incoming `startsAt` are known and incoming `startsAt` is strictly newer
 - if a `resolved` arrives without matching open state, the receiver still emits a resolved orphan event and writes a short-lived closed tombstone
 
 ## TTLs used by the receiver
@@ -432,7 +432,7 @@ redis-cli GET 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
 redis-cli TTL 'alertidemp:4a4f0d2b7c9e1a23:resolved:1776246061'
 ```
 
-If you send the exact same transition again, the existing `alertidemp:*` key causes it to be dropped as a duplicate.
+If you send the exact same notification again, lifecycle processing runs again. Repeated firing refreshes `last_seen_at`; repeated resolved leaves the tombstone unchanged. Neither generates another event.
 
 ## Troubleshooting notes
 
@@ -493,7 +493,7 @@ go run ./cmd/server
 | `alertreceiver_redis_ops_total` | `operation`, `result` | Redis operation outcomes |
 | `alertreceiver_redis_op_duration_seconds` | `operation` | Redis operation latency histogram |
 | `alertreceiver_redis_idemp_setnx_total` | `result` (`set`/`exists`/`error`) | Idempotency `SET NX` outcomes |
-| `alertreceiver_duplicates_dropped_total` | — | Events dropped by idempotency check |
+| `alertreceiver_duplicates_dropped_total` | — | Lifecycle event emissions suppressed by idempotency check |
 | `alertreceiver_state_writes_total` | `result` | Alert transition outcomes such as `opened`, `reopened`, `closed`, `resolved_without_open_state`, `already_firing` |
 | `alertreceiver_state_entries` | `status` (`firing`/`closed`) | Current Redis-backed alert state entries maintained from write-path updates |
 | `alertreceiver_idempotency_keys_created_total` | `transition` | Idempotency keys created successfully |
@@ -575,3 +575,40 @@ _time:7d alert.transition:resolved
 
 If there is a ticket_id label:
     alert.transition:resolved alert.label.ticket_id:""
+
+
+## Stage 1 processing contract and delivery limitations
+
+Every notification reaches lifecycle processing before emission deduplication.
+`Process` returns a `ProcessingResult` and an error. `Outcome` identifies opened,
+repeated firing, closed, repeated resolved, reopened, stale firing, or resolved
+without open state. `TransitionOccurred` means a detected lifecycle transition,
+independently of successful state persistence or OTLP delivery. `Event` contains
+the unchanged lifecycle event for a detected transition and is nil otherwise.
+
+`EventEmissionStatus` is `not_required` for notifications without a transition,
+`suppressed` when an existing idempotency key prevents emission, `failed` when
+the emitter returns an error, or `accepted` when it returns nil. `attempted` is
+the intermediate status during the emitter call. Accepted means emitter acceptance
+only: the current OTel emitter enqueues through the SDK and does not confirm
+backend delivery. The webhook HTTP response continues to depend on the error.
+
+A closed occurrence reopens only when incoming `startsAt` is strictly newer than
+the stored `startsAt`. Older or identical timestamps return stale firing. If
+either timestamp is missing, the conservative choice is to retain closed state;
+a genuine reopen cannot be established. Closed state retains occurrence timing,
+including for orphan resolves. Redis timestamps retain fractional seconds and
+remain compatible with existing RFC3339 values. Repeated resolved notifications
+do not emit events or extend the closed tombstone TTL.
+
+State and idempotency keys are still written before OTLP emission. A crash or
+emission failure after these writes can permanently lose an event: a retry can
+be classified as repeated or have emission suppressed by the existing key.
+SDK acceptance also does not guarantee export. There is no durable outbox,
+rollback, or reliable replay in Stage 1; delivery reliability belongs to Stage 2.
+
+Deduplication remains bounded by state and idempotency TTLs. After closed state
+expires, occurrence history is unavailable, so a delayed firing may look new;
+a late resolve may look orphaned. State read/write errors retain the existing
+best-effort behavior. Concurrent lifecycle decisions are not atomic. This stage
+adds no policy engine, enrichment, incident sinks, or workflows.

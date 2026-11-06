@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/andersh/alertmanager_event_receiver/internal/models"
+	"github.com/andersh/alertmanager_event_receiver/internal/processor"
 	"github.com/andersh/alertmanager_event_receiver/internal/telemetry"
 )
 
 // AlertProcessor processes a single alert instance.
 type AlertProcessor interface {
-	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) error
+	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (processor.ProcessingResult, error)
 }
 
 // Handler is the HTTP handler for Alertmanager webhook deliveries.
@@ -64,7 +65,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hadError := false
 	for _, alert := range payload.Alerts {
-		if err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
+		if _, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
 			h.logger.ErrorContext(ctx, "failed to process alert",
 				slog.String("fingerprint", alert.Fingerprint),
 				slog.String("alertname", alert.Labels["alertname"]),
@@ -95,4 +96,3 @@ func statusClass(code int) string {
 		return "2xx"
 	}
 }
-

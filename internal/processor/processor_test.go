@@ -2,6 +2,7 @@ package processor_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
@@ -60,11 +61,12 @@ func (m *mockStore) CheckAndSetIdempotency(_ context.Context, key string, _ time
 
 type mockEmitter struct {
 	events []models.LifecycleEvent
+	err    error
 }
 
 func (m *mockEmitter) Emit(_ context.Context, e models.LifecycleEvent) error {
 	m.events = append(m.events, e)
-	return nil
+	return m.err
 }
 
 // ---- helpers ----
@@ -100,7 +102,7 @@ func TestOnFiring_NewAlert_EmitsOpenedEvent(t *testing.T) {
 	openedBefore := testutil.ToFloat64(telemetry.StateWritesTotal.WithLabelValues(models.StateOpened))
 	idempBefore := testutil.ToFloat64(telemetry.IdempotencyKeysCreatedTotal.WithLabelValues(models.TransitionFiring))
 
-	err := p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
+	_, err := p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +134,7 @@ func TestOnFiring_AlreadyFiring_NoEmit(t *testing.T) {
 	p := newProcessor(store, emitter)
 	alreadyBefore := testutil.ToFloat64(telemetry.StateWritesTotal.WithLabelValues(models.StateAlreadyFiring))
 
-	_ = p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
 	if len(emitter.events) != 0 {
 		t.Errorf("expected no event for already-firing alert, got %d", len(emitter.events))
 	}
@@ -151,7 +153,7 @@ func TestOnFiring_Reopen_EmitsReopenedEvent(t *testing.T) {
 	p := newProcessor(store, emitter)
 	reopenedBefore := testutil.ToFloat64(telemetry.StateWritesTotal.WithLabelValues(models.StateReopened))
 
-	_ = p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), firingAlert(), "gk", "recv", "http://am")
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event on reopen, got %d", len(emitter.events))
 	}
@@ -179,7 +181,7 @@ func TestOnResolved_WithOpenState_EmitsClosedWithDuration(t *testing.T) {
 	closedBefore := testutil.ToFloat64(telemetry.StateWritesTotal.WithLabelValues(models.StateClosed))
 	idempBefore := testutil.ToFloat64(telemetry.IdempotencyKeysCreatedTotal.WithLabelValues(models.TransitionResolved))
 
-	_ = p.Process(context.Background(), resolvedAlert(), "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), resolvedAlert(), "gk", "recv", "http://am")
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
@@ -208,7 +210,7 @@ func TestOnResolved_Orphan_EmitsWithOrphanMarker(t *testing.T) {
 	orphanBefore := testutil.ToFloat64(telemetry.ResolvedOrphansTotal)
 	stateBefore := testutil.ToFloat64(telemetry.StateWritesTotal.WithLabelValues(models.StateResolvedWithoutOpen))
 
-	_ = p.Process(context.Background(), resolvedAlert(), "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), resolvedAlert(), "gk", "recv", "http://am")
 	if len(emitter.events) != 1 {
 		t.Fatalf("expected 1 event, got %d", len(emitter.events))
 	}
@@ -227,21 +229,21 @@ func TestOnResolved_Orphan_EmitsWithOrphanMarker(t *testing.T) {
 	}
 }
 
-func TestIdempotency_DuplicateDropped(t *testing.T) {
+func TestRepeatedFiring_NoDuplicateEmission(t *testing.T) {
 	store := newMockStore()
 	emitter := &mockEmitter{}
 	p := newProcessor(store, emitter)
 	dupBefore := testutil.ToFloat64(telemetry.DuplicatesDropped)
 
 	alert := firingAlert()
-	_ = p.Process(context.Background(), alert, "gk", "recv", "http://am")
-	_ = p.Process(context.Background(), alert, "gk", "recv", "http://am") // exact duplicate
+	_, _ = p.Process(context.Background(), alert, "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), alert, "gk", "recv", "http://am") // exact duplicate
 
 	if len(emitter.events) != 1 {
 		t.Errorf("expected 1 event (duplicate dropped), got %d", len(emitter.events))
 	}
-	if got := testutil.ToFloat64(telemetry.DuplicatesDropped) - dupBefore; got != 1 {
-		t.Errorf("expected duplicates dropped delta 1, got %v", got)
+	if got := testutil.ToFloat64(telemetry.DuplicatesDropped) - dupBefore; got != 0 {
+		t.Errorf("expected duplicates dropped delta 0, got %v", got)
 	}
 }
 
@@ -252,22 +254,22 @@ func TestStateTransition_FullCycle(t *testing.T) {
 
 	// 1. First firing
 	a := firingAlert()
-	_ = p.Process(context.Background(), a, "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), a, "gk", "recv", "http://am")
 
 	// 2. Repeated firing — no new event
 	a2 := firingAlert()
-	a2.StartsAt = a2.StartsAt.Add(time.Second) // different startsAt so idempotency key differs
-	_ = p.Process(context.Background(), a2, "gk", "recv", "http://am")
+	a2.StartsAt = a.StartsAt // identical occurrence must still reach processing
+	_, _ = p.Process(context.Background(), a2, "gk", "recv", "http://am")
 
 	// 3. Resolved
 	r := resolvedAlert()
 	r.EndsAt = time.Now()
-	_ = p.Process(context.Background(), r, "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), r, "gk", "recv", "http://am")
 
 	// 4. Second firing (new cycle)
 	a3 := firingAlert()
 	a3.StartsAt = time.Now()
-	_ = p.Process(context.Background(), a3, "gk", "recv", "http://am")
+	_, _ = p.Process(context.Background(), a3, "gk", "recv", "http://am")
 
 	if len(emitter.events) != 3 {
 		t.Errorf("expected 3 events (open, close, reopen), got %d", len(emitter.events))
@@ -283,3 +285,141 @@ func TestStateTransition_FullCycle(t *testing.T) {
 	}
 }
 
+func TestRepeatedFiringWithExistingIdempotencyKeyRefreshesLastSeen(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+	p := newProcessor(store, emitter)
+	a := firingAlert()
+	first, err := p.Process(context.Background(), a, "gk", "recv", "am")
+	if err != nil || first.Outcome != processor.Opened || !first.TransitionOccurred || first.EventEmissionStatus != processor.EmissionAccepted {
+		t.Fatalf("first: %+v, %v", first, err)
+	}
+	key := state.IdempotencyKey(a.Fingerprint, a.Status, a.StartsAt)
+	if !store.idempKeys[key] {
+		t.Fatal("expected existing idempotency key")
+	}
+	old := time.Now().Add(-time.Hour)
+	store.states[a.Fingerprint].LastSeenAt = old
+	result, err := p.Process(context.Background(), a, "gk", "recv", "am")
+	if err != nil || result.Outcome != processor.RepeatedFiring || result.TransitionOccurred || result.Event != nil || result.EventEmissionStatus != processor.EmissionNotRequired {
+		t.Fatalf("repeat: %+v, %v", result, err)
+	}
+	if !store.states[a.Fingerprint].LastSeenAt.After(old) {
+		t.Fatal("last_seen_at was not refreshed")
+	}
+	if len(emitter.events) != 1 {
+		t.Fatal("duplicate lifecycle event")
+	}
+}
+
+func TestClosedOccurrenceClassification(t *testing.T) {
+	base := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name             string
+		stored, incoming time.Time
+		status           string
+		want             processor.Outcome
+		transition       bool
+	}{
+		{"newer", base, base.Add(time.Minute), "firing", processor.Reopened, true},
+		{"same", base, base, "firing", processor.StaleFiring, false},
+		{"older", base, base.Add(-time.Minute), "firing", processor.StaleFiring, false},
+		{"missing incoming", base, time.Time{}, "firing", processor.StaleFiring, false},
+		{"missing stored", time.Time{}, base, "firing", processor.StaleFiring, false},
+		{"both missing", time.Time{}, time.Time{}, "firing", processor.StaleFiring, false},
+		{"resolved", base, base, "resolved", processor.RepeatedResolved, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMockStore()
+			store.states["abc123"] = &state.AlertState{Status: "closed", StartsAt: tc.stored}
+			emitter := &mockEmitter{}
+			p := newProcessor(store, emitter)
+			a := firingAlert()
+			a.StartsAt = tc.incoming
+			a.Status = tc.status
+			result, err := p.Process(context.Background(), a, "gk", "recv", "am")
+			if err != nil || result.Outcome != tc.want || result.TransitionOccurred != tc.transition {
+				t.Fatalf("got %+v, %v", result, err)
+			}
+			if tc.transition {
+				if len(emitter.events) != 1 {
+					t.Fatal("expected reopen event")
+				}
+			} else if len(emitter.events) != 0 || store.states[a.Fingerprint].Status != "closed" {
+				t.Fatal("closed occurrence changed")
+			}
+		})
+	}
+}
+
+func TestIdempotencySuppressesEmissionOnly(t *testing.T) {
+	for _, status := range []string{"firing", "resolved"} {
+		t.Run(status, func(t *testing.T) {
+			store := newMockStore()
+			emitter := &mockEmitter{}
+			p := newProcessor(store, emitter)
+			a := resolvedAlert()
+			a.Status = status
+			at := a.StartsAt
+			if status == "resolved" {
+				at = a.EndsAt
+			}
+			store.idempKeys[state.IdempotencyKey(a.Fingerprint, status, at)] = true
+			result, err := p.Process(context.Background(), a, "gk", "recv", "am")
+			if err != nil || !result.TransitionOccurred || result.Event == nil || result.EventEmissionStatus != processor.EmissionSuppressed {
+				t.Fatalf("got %+v, %v", result, err)
+			}
+			if len(emitter.events) != 0 || store.states[a.Fingerprint] == nil {
+				t.Fatal("expected state processing without emission")
+			}
+		})
+	}
+}
+
+func TestOrphanTombstonePreservesOccurrence(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+	p := newProcessor(store, emitter)
+	a := resolvedAlert()
+	result, err := p.Process(context.Background(), a, "gk", "recv", "am")
+	if err != nil || result.Outcome != processor.ResolvedWithoutOpen || !result.TransitionOccurred {
+		t.Fatalf("got %+v, %v", result, err)
+	}
+	if !store.states[a.Fingerprint].StartsAt.Equal(a.StartsAt) {
+		t.Fatal("lost startsAt")
+	}
+	result, err = p.Process(context.Background(), a, "gk", "recv", "am")
+	if err != nil || result.Outcome != processor.RepeatedResolved || result.TransitionOccurred {
+		t.Fatalf("got %+v, %v", result, err)
+	}
+	a.Status = "firing"
+	result, err = p.Process(context.Background(), a, "gk", "recv", "am")
+	if err != nil || result.Outcome != processor.StaleFiring {
+		t.Fatalf("got %+v, %v", result, err)
+	}
+	if len(emitter.events) != 1 {
+		t.Fatal("unexpected duplicate event")
+	}
+}
+
+func TestEmissionFailurePreservesDetectedTransition(t *testing.T) {
+	for _, status := range []string{"firing", "resolved"} {
+		t.Run(status, func(t *testing.T) {
+			store := newMockStore()
+			emitErr := errors.New("emit failed")
+			emitter := &mockEmitter{err: emitErr}
+			p := newProcessor(store, emitter)
+			a := resolvedAlert()
+			a.Status = status
+			result, err := p.Process(context.Background(), a, "gk", "recv", "am")
+			if !errors.Is(err, emitErr) || !result.TransitionOccurred || result.Event == nil || result.EventEmissionStatus != processor.EmissionFailed {
+				t.Fatalf("got %+v, %v", result, err)
+			}
+			// Stage 1 deliberately retains the pre-emission state write failure window.
+			retry, err := p.Process(context.Background(), a, "gk", "recv", "am")
+			if err != nil || retry.TransitionOccurred || len(emitter.events) != 1 {
+				t.Fatalf("retry: %+v, %v", retry, err)
+			}
+		})
+	}
+}

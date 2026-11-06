@@ -80,9 +80,9 @@ func (r *RedisStore) SetFiring(ctx context.Context, fingerprint string, s AlertS
 	}
 	fields := map[string]interface{}{
 		"status":          "firing",
-		"first_firing_at": s.FirstFiringAt.UTC().Format(time.RFC3339),
-		"last_seen_at":    s.LastSeenAt.UTC().Format(time.RFC3339),
-		"starts_at":       s.StartsAt.UTC().Format(time.RFC3339),
+		"first_firing_at": s.FirstFiringAt.UTC().Format(time.RFC3339Nano),
+		"last_seen_at":    s.LastSeenAt.UTC().Format(time.RFC3339Nano),
+		"starts_at":       s.StartsAt.UTC().Format(time.RFC3339Nano),
 		"alertname":       s.Alertname,
 	}
 	for k, v := range s.Labels {
@@ -115,7 +115,7 @@ func (r *RedisStore) SetFiring(ctx context.Context, fingerprint string, s AlertS
 func (r *RedisStore) UpdateLastSeen(ctx context.Context, fingerprint string, at time.Time) error {
 	started := time.Now()
 	key := stateKey(fingerprint)
-	if err := r.client.HSet(ctx, key, "last_seen_at", at.UTC().Format(time.RFC3339)).Err(); err != nil {
+	if err := r.client.HSet(ctx, key, "last_seen_at", at.UTC().Format(time.RFC3339Nano)).Err(); err != nil {
 		recordRedisOp("update_last_seen", "error", started)
 		return err
 	}
@@ -192,4 +192,3 @@ func FingerprintSource(labels map[string]string) string {
 	sort.Strings(keys)
 	return strings.Join(keys, "+")
 }
-

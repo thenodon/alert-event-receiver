@@ -187,3 +187,21 @@ func TestFingerprintSource(t *testing.T) {
 	}
 }
 
+func TestClosedStatePreservesPreciseOccurrenceTiming(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	at := time.Date(2026, 4, 15, 10, 0, 0, 123456789, time.UTC)
+	if err := store.SetFiring(ctx, "precise", state.AlertState{FirstFiringAt: at, StartsAt: at, LastSeenAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetClosed(ctx, "precise", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetState(ctx, "precise")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != "closed" || !got.StartsAt.Equal(at) || !got.FirstFiringAt.Equal(at) {
+		t.Fatalf("occurrence timing lost: %+v", got)
+	}
+}
