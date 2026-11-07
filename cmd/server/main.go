@@ -33,12 +33,18 @@ func main() {
 		os.Exit(0)
 	}
 
+	os.Exit(run())
+}
+
+// run returns only after deferred resource cleanup has completed.
+func run() (exitCode int) {
 	logger := telemetry.NewLogger()
+	telemetry.ConfigureSDKDiagnostics(logger)
 
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error("failed to load config", slog.Any("error", err))
-		os.Exit(1)
+		logger.Error("failed to load config", "component", "config", "operation", "load", "error", telemetry.SafeError(err))
+		return 1
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -46,16 +52,14 @@ func main() {
 
 	// Initialise OTel log SDK.
 	// Endpoint and credentials come from standard OTel env vars (OTEL_EXPORTER_OTLP_ENDPOINT, etc.).
-	otelShutdown, err := telemetry.InitOTel(ctx, cfg.OTelServiceName)
+	otelShutdown, err := telemetry.InitOTel(ctx, cfg.OTelServiceName, logger)
 	if err != nil {
-		logger.Error("failed to initialise OTel", slog.Any("error", err))
-		os.Exit(1)
+		logger.Error("failed to initialise OTel", "component", "otel_sdk", "operation", "initialize", "error", telemetry.SafeError(err))
+		return 1
 	}
 	defer func() {
-		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := otelShutdown(shutCtx); err != nil {
-			logger.Error("OTel shutdown error", slog.Any("error", err))
+		if err := shutdownOTel(logger, otelShutdown, 5*time.Second); err != nil {
+			exitCode = 1
 		}
 	}()
 
@@ -65,9 +69,14 @@ func main() {
 		Password: cfg.RedisPassword,
 		DB:       cfg.RedisDB,
 	})
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			logger.Error("Valkey close failed", "component", "valkey", "operation", "close", "error", telemetry.SafeError(err))
+		}
+	}()
 	if err := redisClient.Ping(ctx).Err(); err != nil {
-		logger.Error("Redis ping failed", slog.String("addr", cfg.RedisAddr), slog.Any("error", err))
-		os.Exit(1)
+		logger.Error("Valkey ping failed", "component", "valkey", "operation", "ping", "error", telemetry.SafeError(err))
+		return 1
 	}
 	logger.Info("Redis connected", slog.String("addr", cfg.RedisAddr))
 
@@ -95,7 +104,7 @@ func main() {
 	go func() {
 		logger.Info("server started", slog.String("addr", srv.Addr))
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server error", slog.Any("error", err))
+			logger.Error("server error", "component", "http", "operation", "serve", "error", telemetry.SafeError(err))
 			stop()
 		}
 	}()
@@ -106,6 +115,22 @@ func main() {
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
-		logger.Error("HTTP shutdown error", slog.Any("error", err))
+		logger.Error("HTTP shutdown error", "component", "http", "operation", "shutdown", "error", telemetry.SafeError(err))
+		_ = srv.Close()
+		return 1
 	}
+	return 0
+}
+
+func shutdownOTel(logger *slog.Logger, shutdown func(context.Context) error, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	logger.Info("flushing and shutting down OpenTelemetry", "component", "otel_sdk", "operation", "shutdown", "timeout", timeout.String())
+	err := shutdown(ctx)
+	if err != nil {
+		logger.Error("OpenTelemetry shutdown failed", "component", "otel_sdk", "operation", "shutdown", "error", telemetry.SafeError(err))
+	} else {
+		logger.Info("OpenTelemetry shutdown completed", "component", "otel_sdk", "operation", "shutdown")
+	}
+	return err
 }

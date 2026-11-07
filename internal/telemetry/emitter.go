@@ -39,6 +39,7 @@ func (e *OTelEmitter) Emit(ctx context.Context, event models.LifecycleEvent) err
 	r.SetSeverityText(event.Labels["severity"])
 
 	attrs := []attribute.KeyValue{
+		attribute.String("event.id", models.LifecycleEventID(event.Fingerprint, event.StartsAt, event.Transition)),
 		attribute.String("event.kind", event.EventKind),
 		attribute.Int("event.version", event.EventVersion),
 		attribute.String("alert.transition", event.Transition),

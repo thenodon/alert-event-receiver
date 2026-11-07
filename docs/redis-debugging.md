@@ -261,3 +261,22 @@ alertreceiver_closed_ttl_seconds
 ```
 
 Consult [README](../README.md#observability) for their descriptions and the application endpoints.
+
+
+## Delivery Semantics and Failure Handling
+
+Valkey state and idempotency operations are unchanged in v0.2.0. A generated
+transition, an existing idempotency key, or HTTP 200 does not establish backend
+persistence. The entire HTTP batch is now validated before any state processing;
+invalid alerts receive HTTP 400. Operational state failures still produce 500.
+
+Use `alertreceiver_redis_errors_total{operation="setnx_idemp"}` or
+`alertreceiver_redis_idemp_setnx_total{result="error"}` for idempotency errors;
+the former additional processor-side `operation="idempotency"` increment has
+been removed to avoid double counting. Do not sum both metrics for the same error.
+
+`event.id` is available in emitted events and relevant processing failures for
+correlation. Batch exporter errors deliberately have no event_id. The new
+`alertreceiver_otlp_export_requests_total{result="error"}` reports failed exporter
+calls, not rollback of Valkey state or confirmed permanent loss of every record
+in a batch. See [delivery metrics and limitations](../README.md#delivery-semantics-and-failure-handling).

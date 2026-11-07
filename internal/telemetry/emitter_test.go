@@ -59,6 +59,7 @@ func TestEmitterRecord(t *testing.T) {
 				}
 				expectedTimestamp := start
 				expected := map[string]attribute.Value{
+					"event.id":   attribute.StringValue(models.LifecycleEventID(event.Fingerprint, event.StartsAt, event.Transition)),
 					"event.kind": attribute.StringValue("alert_transition"), "event.version": attribute.IntValue(1),
 					"alert.transition": attribute.StringValue(transition), "alert.status": attribute.StringValue(transition),
 					"alert.fingerprint": attribute.StringValue("abc123"), "alert.fingerprint_source": attribute.StringValue("alertname+severity"),

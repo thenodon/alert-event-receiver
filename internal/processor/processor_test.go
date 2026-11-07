@@ -1,11 +1,13 @@
 package processor_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -627,5 +629,42 @@ func TestIdempotencyFailureRemainsBestEffort(t *testing.T) {
 	result, err := newProcessor(store, emitter).Process(context.Background(), firingAlert(), "", "", "")
 	if err != nil || result.Outcome != processor.Opened || result.EventEmissionStatus != processor.EmissionAccepted || len(emitter.events) != 1 {
 		t.Fatalf("got %+v, %v", result, err)
+	}
+}
+
+func TestProcessingStageMetrics(t *testing.T) {
+	store := newMockStore()
+	emitter := &mockEmitter{}
+	p := newProcessor(store, emitter)
+	a := firingAlert()
+	validated := telemetry.AlertsValidated.WithLabelValues("firing")
+	generated := telemetry.EventsGenerated.WithLabelValues("firing")
+	repeated := telemetry.ProcessingOutcomes.WithLabelValues(string(processor.RepeatedFiring))
+	v0, g0, r0 := testutil.ToFloat64(validated), testutil.ToFloat64(generated), testutil.ToFloat64(repeated)
+	if _, err := p.Process(context.Background(), a, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Process(context.Background(), a, "", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if testutil.ToFloat64(validated)-v0 != 2 || testutil.ToFloat64(generated)-g0 != 1 || testutil.ToFloat64(repeated)-r0 != 1 {
+		t.Fatal("stage metrics incorrect")
+	}
+}
+
+func TestStateFailureLogCorrelation(t *testing.T) {
+	var logs bytes.Buffer
+	sentinel := errors.New("Valkey unavailable")
+	store := &failingStore{mockStore: newMockStore(), operation: "get_state", failure: sentinel}
+	p := processor.New(store, &mockEmitter{}, time.Hour, time.Hour, slog.New(slog.NewJSONHandler(&logs, nil)))
+	a := firingAlert()
+	_, err := p.Process(context.Background(), a, "", "", "")
+	if !errors.Is(err, sentinel) {
+		t.Fatal(err)
+	}
+	for _, field := range []string{models.LifecycleEventID(a.Fingerprint, a.StartsAt, a.Status), `"component":"processor"`, `"operation":"get_state"`, `"alert_fingerprint":"abc123"`, `"alert_transition":"firing"`} {
+		if !strings.Contains(logs.String(), field) {
+			t.Errorf("missing %s: %s", field, logs.String())
+		}
 	}
 }

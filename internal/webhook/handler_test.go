@@ -54,6 +54,7 @@ func alert(status, fp string) models.Alert {
 		Fingerprint: fp,
 		Labels:      map[string]string{"alertname": "TestAlert", "severity": "warning"},
 		StartsAt:    time.Now(),
+		EndsAt:      time.Now().Add(time.Minute),
 	}
 }
 
@@ -136,5 +137,53 @@ func TestWebhook_EmptyAlerts_Returns200(t *testing.T) {
 	}
 	if len(proc.calls) != 0 {
 		t.Errorf("expected 0 processed alerts, got %d", len(proc.calls))
+	}
+}
+
+func TestWebhookRejectsInvalidBatchBeforeProcessing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func() []byte
+	}{
+		{"missing start", func() []byte {
+			a := alert("firing", "bad")
+			a.StartsAt = time.Time{}
+			return payload(alert("firing", "valid"), a)
+		}},
+		{"missing end", func() []byte {
+			a := alert("resolved", "bad")
+			a.EndsAt = time.Time{}
+			return payload(alert("firing", "valid"), a)
+		}},
+		{"end before start", func() []byte {
+			a := alert("resolved", "bad")
+			a.EndsAt = a.StartsAt.Add(-time.Second)
+			return payload(a)
+		}},
+		{"unknown status", func() []byte { return payload(alert("custom", "bad")) }},
+		{"null", func() []byte { return []byte("null") }},
+		{"multiple documents", func() []byte { return append(payload(alert("firing", "valid")), []byte(" {}")...) }},
+		{"trailing malformed", func() []byte { return append(payload(alert("firing", "valid")), []byte(" invalid")...) }},
+		{"invalid timestamp string", func() []byte {
+			return []byte(`{"alerts":[{"status":"firing","fingerprint":"fp","startsAt":"invalid"}]}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proc := &mockProcessor{}
+			rec := httptest.NewRecorder()
+			newHandler(proc).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(tc.body())))
+			if rec.Code != http.StatusBadRequest || len(proc.calls) != 0 {
+				t.Fatalf("got status=%d calls=%d", rec.Code, len(proc.calls))
+			}
+		})
+	}
+}
+
+func TestWebhookOperationalErrorStillProcessesBatch(t *testing.T) {
+	proc := &mockProcessor{err: errors.New("Valkey read failed")}
+	rec := httptest.NewRecorder()
+	newHandler(proc).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/webhook", bytes.NewReader(payload(alert("firing", "a"), alert("resolved", "b")))))
+	if rec.Code != http.StatusInternalServerError || len(proc.calls) != 2 {
+		t.Fatalf("got status=%d calls=%d", rec.Code, len(proc.calls))
 	}
 }

@@ -38,16 +38,18 @@ func New(store state.Store, emitter EventEmitter, closedTTL, idempTTL time.Durat
 
 // Process handles every notification before emission deduplication. A result with
 // Outcome Indeterminate is not an authoritative lifecycle decision.
-func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (ProcessingResult, error) {
-	if err := validate(alert); err != nil {
+func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (result ProcessingResult, processErr error) {
+	defer func() { telemetry.ProcessingOutcomes.WithLabelValues(string(result.Outcome)).Inc() }()
+	if err := ValidateAlert(alert); err != nil {
 		return ProcessingResult{Outcome: InvalidNotification, EventEmissionStatus: EmissionNotRequired}, err
 	}
+	telemetry.AlertsValidated.WithLabelValues(alert.Status).Inc()
 	current, err := p.store.GetState(ctx, alert.Fingerprint)
 	if err != nil {
-		return p.stateFailure(ctx, "get_state", err)
+		return p.stateFailure(ctx, alert, "get_state", err)
 	}
 	if current != nil && (current.StartsAt.IsZero() || (current.Status != "firing" && current.Status != "closed")) {
-		return p.stateFailure(ctx, "get_state", fmt.Errorf("invalid stored occurrence"))
+		return p.stateFailure(ctx, alert, "get_state", fmt.Errorf("invalid stored occurrence"))
 	}
 	if current != nil && alert.StartsAt.Before(current.StartsAt) {
 		outcome := StaleFiring
@@ -65,7 +67,7 @@ func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, r
 	}
 	if same && alert.Status == models.TransitionFiring {
 		if err := p.store.UpdateLastSeen(ctx, alert.Fingerprint, time.Now()); err != nil {
-			return p.stateFailure(ctx, "update_last_seen", err)
+			return p.stateFailure(ctx, alert, "update_last_seen", err)
 		}
 		telemetry.StateWritesTotal.WithLabelValues(models.StateAlreadyFiring).Inc()
 		return noTransition(RepeatedFiring), nil
@@ -94,7 +96,7 @@ func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, r
 			}
 		}
 		if err := p.store.SetFiring(ctx, alert.Fingerprint, next); err != nil {
-			return p.stateFailure(ctx, "set_firing", err)
+			return p.stateFailure(ctx, alert, "set_firing", err)
 		}
 	} else {
 		outcome = ResolvedWithoutOpen
@@ -118,19 +120,24 @@ func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, r
 		event.Labels = next.Labels
 		event.Alertname = next.Alertname
 		if err := p.store.SetClosed(ctx, alert.Fingerprint, next, p.closedStateTTL); err != nil {
-			return p.stateFailure(ctx, "set_closed", err)
+			return p.stateFailure(ctx, alert, "set_closed", err)
 		}
 		if !same {
 			telemetry.ResolvedOrphansTotal.Inc()
 		}
 	}
 	telemetry.StateWritesTotal.WithLabelValues(event.StateWriteResult).Inc()
+	telemetry.EventsGenerated.WithLabelValues(event.Transition).Inc()
+	if outcome == SupersededFiring || outcome == ResolvedWithoutOpen {
+		p.logger.With(alertLogFields(alert)...).WarnContext(ctx, "unmatched lifecycle occurrence", "operation", "process", "outcome", string(outcome))
+	}
 	return p.emit(ctx, alert, event, outcome)
 }
 
-func validate(alert models.Alert) error {
+// ValidateAlert checks alert fields without state access or side effects.
+func ValidateAlert(alert models.Alert) error {
 	if alert.Status != models.TransitionFiring && alert.Status != models.TransitionResolved {
-		return fmt.Errorf("invalid alert status %q", alert.Status)
+		return fmt.Errorf("invalid alert status (expected firing or resolved)")
 	}
 	if alert.Fingerprint == "" {
 		return fmt.Errorf("fingerprint is required")
@@ -159,8 +166,8 @@ func noTransition(outcome Outcome) ProcessingResult {
 	return ProcessingResult{Outcome: outcome, EventEmissionStatus: EmissionNotRequired}
 }
 
-func (p *Processor) stateFailure(ctx context.Context, operation string, err error) (ProcessingResult, error) {
-	p.logger.ErrorContext(ctx, "required state operation failed", slog.String("operation", operation), slog.Any("error", err))
+func (p *Processor) stateFailure(ctx context.Context, alert models.Alert, operation string, err error) (ProcessingResult, error) {
+	p.logger.With(alertLogFields(alert)...).ErrorContext(ctx, "required state operation failed", slog.String("operation", operation), slog.String("error", telemetry.SafeError(err)))
 	return noTransition(Indeterminate), fmt.Errorf("%s: %w", operation, err)
 }
 
@@ -172,15 +179,16 @@ func (p *Processor) emit(ctx context.Context, alert models.Alert, event models.L
 	if err != nil {
 		// Log and continue: on idempotency failure we prefer emitting over silently dropping.
 		p.logger.ErrorContext(ctx, "idempotency check failed — processing anyway",
-			slog.String("fingerprint", alert.Fingerprint),
-			slog.String("transition", alert.Status),
-			slog.Any("error", err),
+			slog.String("component", "processor"), slog.String("operation", "idempotency"),
+			slog.String("event_id", models.LifecycleEventID(alert.Fingerprint, alert.StartsAt, alert.Status)),
+			slog.String("alert_fingerprint", alert.Fingerprint), slog.String("alert_transition", alert.Status),
+			slog.String("error", telemetry.SafeError(err)),
 		)
-		telemetry.RedisErrors.WithLabelValues("idempotency").Inc()
 	} else if !isNew {
 		p.logger.InfoContext(ctx, "lifecycle event emission suppressed",
-			slog.String("fingerprint", alert.Fingerprint),
-			slog.String("transition", alert.Status),
+			slog.String("component", "processor"), slog.String("operation", "idempotency"),
+			slog.String("event_id", models.LifecycleEventID(alert.Fingerprint, alert.StartsAt, alert.Status)),
+			slog.String("alert_fingerprint", alert.Fingerprint), slog.String("alert_transition", alert.Status),
 		)
 		telemetry.DuplicatesDropped.Inc()
 		result.EventEmissionStatus = EmissionSuppressed
@@ -192,10 +200,15 @@ func (p *Processor) emit(ctx context.Context, alert models.Alert, event models.L
 
 	if err := p.emitter.Emit(ctx, event); err != nil {
 		result.EventEmissionStatus = EmissionFailed
+		p.logger.With(alertLogFields(alert)...).ErrorContext(ctx, "lifecycle event submission failed", "operation", "emit", "state_already_written", true, "error", telemetry.SafeError(err))
 		telemetry.EmitErrors.WithLabelValues(event.Transition).Inc()
 		return result, fmt.Errorf("emit %s event: %w", event.Transition, err)
 	}
 	result.EventEmissionStatus = EmissionAccepted
 	telemetry.EventsEmitted.WithLabelValues(event.Transition).Inc()
 	return result, nil
+}
+
+func alertLogFields(alert models.Alert) []any {
+	return []any{"component", "processor", "event_id", models.LifecycleEventID(alert.Fingerprint, alert.StartsAt, alert.Status), "alert_fingerprint", alert.Fingerprint, "alert_transition", alert.Status}
 }
