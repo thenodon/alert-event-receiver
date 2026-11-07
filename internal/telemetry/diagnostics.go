@@ -56,6 +56,10 @@ func (h safeSDKHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 func (h safeSDKHandler) WithGroup(name string) slog.Handler {
 	return safeSDKHandler{h.Handler.WithGroup(name)}
 }
+
+// safeAttr redacts known text patterns and groups, not arbitrary object graphs.
+// Opaque Any values are omitted rather than invoking String/MarshalJSON methods
+// or forwarding structured data whose contents we cannot safely inspect.
 func safeAttr(a slog.Attr) slog.Attr {
 	a.Value = a.Value.Resolve()
 	switch a.Value.Kind() {
@@ -64,6 +68,8 @@ func safeAttr(a slog.Attr) slog.Attr {
 	case slog.KindAny:
 		if err, ok := a.Value.Any().(error); ok {
 			a.Value = slog.StringValue(SafeError(err))
+		} else {
+			a.Value = slog.StringValue("[omitted: unsupported diagnostic value]")
 		}
 	case slog.KindGroup:
 		attrs := a.Value.Group()
@@ -81,9 +87,9 @@ func safeAttr(a slog.Attr) slog.Attr {
 
 var diagnosticURL = regexp.MustCompile(`https?://[^\s"<>]+`)
 
-// SafeError retains useful failure context while masking configured secrets and
-// URL credentials/query strings. Payloads and authentication headers are never
-// deliberately attached to logs. Arbitrary backend error text is not trusted.
+// SafeError applies best-effort masking of configured secrets and HTTP URL
+// credentials/query strings to error text. It cannot identify every secret or
+// sanitize arbitrary SDK data; callers must avoid attaching sensitive payloads.
 func SafeError(err error) string {
 	if err == nil {
 		return ""

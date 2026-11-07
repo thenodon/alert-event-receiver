@@ -59,3 +59,56 @@ func TestInvalidHeaderDoesNotEchoValue(t *testing.T) {
 		t.Fatal("header parse error leaked input", err)
 	}
 }
+
+// These methods must never be invoked by the diagnostic handler or JSON sink.
+// Arbitrary object serialization may disclose fields or have side effects.
+type opaqueDiagnostic struct{ Secret string }
+
+func (opaqueDiagnostic) String() string { panic("unexpected diagnostic String call") }
+func (opaqueDiagnostic) MarshalJSON() ([]byte, error) {
+	panic("unexpected diagnostic MarshalJSON call")
+}
+
+type diagnosticLogValuer struct{ value slog.Value }
+
+func (v diagnosticLogValuer) LogValue() slog.Value { return v.value }
+
+func TestOpaqueDiagnosticValuesAreOmitted(t *testing.T) {
+	t.Setenv("REDIS_PASSWORD", "configured-secret")
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{"map", map[string]any{"password": "unconfigured-secret"}},
+		{"slice", []string{"unconfigured-secret"}},
+		{"struct", opaqueDiagnostic{Secret: "unconfigured-secret"}},
+		{"pointer", &opaqueDiagnostic{Secret: "unconfigured-secret"}},
+		{"log valuer returning opaque", diagnosticLogValuer{value: slog.AnyValue(map[string]string{"password": "unconfigured-secret"})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs lockedLogBuffer
+			logger := slog.New(safeSDKHandler{slog.NewJSONHandler(&logs, nil)})
+			logger.With("bound", tc.value).Error("SDK diagnostic", slog.Any("object", tc.value), slog.Group("nested", slog.Any("object", tc.value)))
+			if strings.Contains(logs.String(), "unconfigured-secret") || strings.Count(logs.String(), "[omitted: unsupported diagnostic value]") != 3 {
+				t.Fatalf("opaque value not omitted: %s", logs.String())
+			}
+		})
+	}
+	// Resolved LogValuers and normal groups still undergo best-effort text masking.
+	attr := safeAttr(slog.Any("dynamic", diagnosticLogValuer{value: slog.GroupValue(slog.String("password", "configured-secret"))}))
+	if attr.Value.Kind() != slog.KindGroup || attr.Value.Group()[0].Value.String() != "[REDACTED]" {
+		t.Fatalf("resolved group not redacted: %v", attr)
+	}
+}
+
+func TestTextRedactionIsBestEffort(t *testing.T) {
+	t.Setenv("REDIS_PASSWORD", "configured-secret")
+	attr := safeAttr(slog.String("message", "configured-secret and unknown-sensitive-text"))
+	if attr.Value.String() != "[REDACTED] and unknown-sensitive-text" {
+		t.Fatalf("unexpected text handling: %v", attr)
+	}
+	errAttr := safeAttr(slog.Any("error", errors.New("configured-secret: connection failed")))
+	if errAttr.Value.Kind() != slog.KindString || errAttr.Value.String() != "[REDACTED]: connection failed" {
+		t.Fatalf("lost sanitized error context: %v", errAttr)
+	}
+}

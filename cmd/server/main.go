@@ -101,25 +101,43 @@ func run() (exitCode int) {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	serveDone := make(chan error, 1)
 	go func() {
-		logger.Info("server started", slog.String("addr", srv.Addr))
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			logger.Error("server error", "component", "http", "operation", "serve", "error", telemetry.SafeError(err))
-			stop()
-		}
+		logger.Info("starting HTTP server", "component", "http", "operation", "serve", slog.String("addr", srv.Addr))
+		serveDone <- srv.ListenAndServe()
 	}()
 
-	<-ctx.Done()
-	logger.Info("shutting down gracefully")
+	var serveErr error
+	serveReturned := false
+	select {
+	case serveErr = <-serveDone:
+		serveReturned = true
+	case <-ctx.Done():
+	}
+	logger.Info("stopping HTTP server", "component", "http", "operation", "shutdown")
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := srv.Shutdown(shutCtx); err != nil {
 		logger.Error("HTTP shutdown error", "component", "http", "operation", "shutdown", "error", telemetry.SafeError(err))
 		_ = srv.Close()
-		return 1
+		exitCode = 1
 	}
-	return 0
+	// Shutdown (or Close on timeout) stops ListenAndServe. Check its result even
+	// if a signal arrived concurrently with an unexpected listener failure.
+	if !serveReturned {
+		select {
+		case serveErr = <-serveDone:
+		case <-shutCtx.Done():
+			logger.Error("HTTP server did not stop within shutdown timeout", "component", "http", "operation", "shutdown", "error", telemetry.SafeError(shutCtx.Err()))
+			exitCode = 1
+		}
+	}
+	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+		logger.Error("server error", "component", "http", "operation", "serve", "error", telemetry.SafeError(serveErr))
+		exitCode = 1
+	}
+	return exitCode
 }
 
 func shutdownOTel(logger *slog.Logger, shutdown func(context.Context) error, timeout time.Duration) error {

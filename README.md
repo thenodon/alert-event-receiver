@@ -359,10 +359,18 @@ sum by (outcome) (rate(alertreceiver_processing_outcomes_total{outcome=~"repeate
 ### SDK diagnostics, batching and shutdown
 
 Application and SDK failures use structured logs with component, operation and
-sanitized error context. Configured authentication-header values, Redis passwords,
-and credentials/query strings in HTTP URLs are redacted; full alert payloads and
-annotations are not logged. Backend diagnostics may contain arbitrary server text;
-operators should also avoid exposing sensitive data in backend error messages.
+best-effort redaction of textual error context. String values, error messages,
+and resolved slog groups are checked for configured authentication-header values,
+Redis passwords, and credentials/query strings in HTTP URLs. Opaque
+`slog.KindAny` values (such as maps, slices, structs, custom Stringers and JSON
+marshalers) are omitted rather than serialized; their contents are not recursively
+sanitized. `LogValuer` values are resolved and their resulting kind is handled by
+the same rules. Full alert payloads and annotations are not deliberately logged.
+
+This is **not comprehensive sanitization of arbitrary SDK diagnostic data**.
+Unknown secrets, attribute/group names, and sensitive text not matching the known
+redaction patterns can remain visible. Operators should avoid putting secrets in
+diagnostic text or backend error messages and restrict access to application logs.
 
 The SDK global error handler observes diagnostics independently of exporter
 metrics. Both SDK logging and error-handler configuration are process-global and
@@ -370,7 +378,13 @@ installed once at startup. Queue-full warnings are routed to structured logs;
 there is no stable per-event rejection callback or queue-drop Prometheus counter
 in this implementation. Experimental SDK self-metrics and undocumented internals
 are not used. Queue overflow warnings are emitted when the SDK next exports or
-flushes, so a crash can prevent even that warning.
+flushes, so a crash can prevent even that warning. Queue drops are observable
+through these structured SDK diagnostics but are **not counted** in
+`alertreceiver_otlp_export_requests_total` unless an Export call actually occurs,
+nor in `alertreceiver_otel_sdk_errors_total` unless the SDK invokes its error
+handler. In the installed SDK, queue overflow produces a logging warning, not an
+error-handler callback. Any later export is counted independently of the queue
+drop; neither counter is a queue-drop or permanent-loss counter.
 
 SDK-managed batching and exporter retry defaults remain unchanged. Supported
 batch settings are `OTEL_BLRP_MAX_QUEUE_SIZE`, `OTEL_BLRP_SCHEDULE_DELAY`,
@@ -427,7 +441,9 @@ suppress later notifications for events that were never delivered.
 Shutdown first allows up to 10 seconds for HTTP requests to drain, then closes
 Valkey and allows up to 5 seconds for LoggerProvider.Shutdown to flush pending
 batches and release the exporter. Shutdown uses a fresh, non-cancelled context;
-startup failure paths also clean up initialized resources. Timeout/flush/exporter
+startup failure paths also clean up initialized resources. Unexpected HTTP listener
+failures, including an occupied port, are logged and return a nonzero process exit
+code after cleanup; they are not treated as graceful shutdown. Timeout/flush/exporter
 shutdown errors produce structured logs. No shutdown-specific metrics are added.
 Final process counters may not be scraped before exit. A successful flush still
 provides no query-level persistence verification.

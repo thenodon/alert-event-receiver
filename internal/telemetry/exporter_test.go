@@ -232,6 +232,7 @@ func TestQueueDropsAreDiagnosticsNotExporterFailures(t *testing.T) {
 	}()
 	emitter := &OTelEmitter{logger: provider.Logger("queue-test")}
 	errBefore := testutil.ToFloat64(OTLPExportRequests.WithLabelValues("grpc", "error"))
+	sdkErrorsBefore := testutil.ToFloat64(OTelSDKErrors)
 	if err := emitter.Emit(context.Background(), models.LifecycleEvent{}); err != nil {
 		t.Fatal(err)
 	}
@@ -258,5 +259,8 @@ func TestQueueDropsAreDiagnosticsNotExporterFailures(t *testing.T) {
 	}
 	if testutil.ToFloat64(OTLPExportRequests.WithLabelValues("grpc", "error")) != errBefore {
 		t.Fatal("queue drop mislabeled as export error")
+	}
+	if testutil.ToFloat64(OTelSDKErrors) != sdkErrorsBefore {
+		t.Fatal("queue warning mislabeled as an SDK error-handler diagnostic")
 	}
 }

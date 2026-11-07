@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/alicebob/miniredis/v2"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -86,4 +87,39 @@ func TestStartupFailureHelper(t *testing.T) {
 	if code := run(); code != 1 {
 		t.Fatalf("startup failure returned %d", code)
 	}
+}
+
+func TestPortBindingFailureExitsNonzeroAndRunsCleanup(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	mr := miniredis.RunT(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPortBindingFailureHelper$")
+	cmd.Env = append(os.Environ(), "ALERTRECEIVER_BIND_FAILURE_TEST=1", "ADDRESS="+listener.Addr().String(), "REDIS_ADDR="+mr.Addr(), "REDIS_PASSWORD=", "REDIS_DB=0", "OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf", "OTEL_EXPORTER_OTLP_HEADERS=", "OTEL_EXPORTER_OTLP_LOGS_HEADERS=", "OTEL_RESOURCE_ATTRIBUTES=")
+	output, err := cmd.CombinedOutput()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("binding failure should exit 1, got %v\n%s", err, output)
+	}
+	text := string(output)
+	if !strings.Contains(text, `"operation":"serve"`) || !strings.Contains(text, "address already in use") {
+		t.Fatalf("listener failure not logged: %s", text)
+	}
+	if !strings.Contains(text, "OpenTelemetry shutdown completed") {
+		t.Fatalf("listener failure bypassed cleanup: %s", text)
+	}
+	if strings.Contains(text, "shutting down gracefully") {
+		t.Fatalf("listener failure reported as graceful shutdown: %s", text)
+	}
+}
+
+func TestPortBindingFailureHelper(t *testing.T) {
+	if os.Getenv("ALERTRECEIVER_BIND_FAILURE_TEST") != "1" {
+		return
+	}
+	os.Exit(run())
 }
