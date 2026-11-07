@@ -72,6 +72,9 @@ func safeAttr(a slog.Attr) slog.Attr {
 			clean[i] = safeAttr(attr)
 		}
 		a.Value = slog.GroupValue(clean...)
+	default:
+		// Numeric, boolean, time and duration values contain no text to redact.
+		// Resolve above also handles KindLogValuer before this switch.
 	}
 	return a
 }

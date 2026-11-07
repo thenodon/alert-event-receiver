@@ -13,7 +13,9 @@ import (
 	"github.com/andersh/alertmanager_event_receiver/internal/telemetry"
 )
 
-// AlertProcessor processes a single alert instance.
+// AlertProcessor processes a single alert instance. Its value result describes
+// the processing outcome even when an error is returned (for example,
+// Indeterminate on a state failure or a detected transition on an emit failure).
 type AlertProcessor interface {
 	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (processor.ProcessingResult, error)
 }
@@ -109,12 +111,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hadError := false
 	for _, alert := range payload.Alerts {
-		if result, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
+		result, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL)
+		// Outcome metadata is independent of the error; ProcessingResult is a value,
+		// not a nullable success-only result.
+		outcome, emissionStatus := string(result.Outcome), string(result.EventEmissionStatus)
+		if err != nil {
 			h.logger.ErrorContext(ctx, "failed to process alert",
 				slog.String("component", "webhook"), slog.String("operation", "process"),
 				slog.String("event_id", models.LifecycleEventID(alert.Fingerprint, alert.StartsAt, alert.Status)),
 				slog.String("alert_fingerprint", alert.Fingerprint), slog.String("alert_transition", alert.Status),
-				slog.String("outcome", string(result.Outcome)), slog.String("emission_status", string(result.EventEmissionStatus)),
+				slog.String("outcome", outcome), slog.String("emission_status", emissionStatus),
 				slog.String("error", telemetry.SafeError(err)),
 			)
 			hadError = true
