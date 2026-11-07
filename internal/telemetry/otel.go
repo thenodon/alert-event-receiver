@@ -3,13 +3,15 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	otellog "go.opentelemetry.io/otel/log"
-	"go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
@@ -28,7 +30,7 @@ import (
 //	OTEL_EXPORTER_OTLP_HEADERS
 //	OTEL_EXPORTER_OTLP_TIMEOUT
 //	OTEL_RESOURCE_ATTRIBUTES
-func InitOTel(ctx context.Context, serviceName string) (shutdown func(context.Context) error, err error) {
+func InitOTel(ctx context.Context, serviceName string, logger *slog.Logger) (shutdown func(context.Context) error, err error) {
 	protocol := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL")
 	if protocol == "" {
 		protocol = "grpc"
@@ -42,6 +44,7 @@ func InitOTel(ctx context.Context, serviceName string) (shutdown func(context.Co
 	var exporter sdklog.Exporter
 	switch protocol {
 	case "http/protobuf", "http":
+		protocol = "http/protobuf"
 		if len(headers) > 0 {
 			exporter, err = otlploghttp.New(ctx, otlploghttp.WithHeaders(headers))
 		} else {
@@ -62,19 +65,24 @@ func InitOTel(ctx context.Context, serviceName string) (shutdown func(context.Co
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(semconv.ServiceName(serviceName)),
-		resource.WithFromEnv(),  // OTEL_RESOURCE_ATTRIBUTES
+		resource.WithFromEnv(), // OTEL_RESOURCE_ATTRIBUTES
 		resource.WithProcess(),
 		resource.WithOS(),
 	)
 	if err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if cleanupErr := exporter.Shutdown(cleanupCtx); cleanupErr != nil {
+			logger.Error("exporter cleanup failed", "component", "otlp_exporter", "operation", "shutdown", "error", SafeError(cleanupErr))
+		}
 		return nil, fmt.Errorf("create OTel resource: %w", err)
 	}
 
 	provider := sdklog.NewLoggerProvider(
 		sdklog.WithResource(res),
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(&observedExporter{Exporter: exporter, protocol: protocol, logger: logger})),
 	)
-	global.SetLoggerProvider(provider)
+	otel.SetLoggerProvider(provider)
 
 	return provider.Shutdown, nil
 }
@@ -112,7 +120,7 @@ func parseHeaderMap(raw string) (map[string]string, error) {
 			k := strings.TrimSpace(part[:i])
 			v := strings.TrimSpace(part[i+1:])
 			if k == "" {
-				return nil, fmt.Errorf("empty header key in segment %q", part)
+				return nil, fmt.Errorf("empty header key")
 			}
 			result[k] = v
 			lastKey = k
@@ -120,7 +128,7 @@ func parseHeaderMap(raw string) (map[string]string, error) {
 		}
 
 		if lastKey == "" {
-			return nil, fmt.Errorf("invalid header segment %q", part)
+			return nil, fmt.Errorf("invalid OTLP header segment (expected key=value)")
 		}
 		result[lastKey] = result[lastKey] + "," + part
 	}
@@ -131,7 +139,7 @@ func parseHeaderMap(raw string) (map[string]string, error) {
 // NewOTelEmitter returns an Emitter that writes lifecycle events as OTel log records.
 func NewOTelEmitter(instrumentationName, instrumentationVersion string) *OTelEmitter {
 	return &OTelEmitter{
-		logger: global.GetLoggerProvider().Logger(
+		logger: otel.GetLoggerProvider().Logger(
 			instrumentationName,
 			otellog.WithInstrumentationVersion(instrumentationVersion),
 		),
@@ -142,5 +150,3 @@ func NewOTelEmitter(instrumentationName, instrumentationVersion string) *OTelEmi
 type OTelEmitter struct {
 	logger otellog.Logger
 }
-
-

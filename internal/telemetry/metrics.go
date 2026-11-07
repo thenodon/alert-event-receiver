@@ -22,12 +22,12 @@ var (
 	// Event emission
 	EventsEmitted = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "alertreceiver_events_emitted_total",
-		Help: "Total lifecycle events emitted via OTLP, labelled by transition (firing, resolved).",
+		Help: "Emitter calls returning successfully (SDK submission, not queue retention or export), labelled by transition.",
 	}, []string{"transition"})
 
 	EmitErrors = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "alertreceiver_emit_errors_total",
-		Help: "Total OTLP emit errors, labelled by transition.",
+		Help: "Synchronous emitter errors before successful SDK submission, labelled by transition.",
 	}, []string{"transition"})
 
 	// State operations
@@ -81,7 +81,40 @@ var (
 	// Duplicate suppression
 	DuplicatesDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "alertreceiver_duplicates_dropped_total",
-		Help: "Total events dropped due to idempotency key match.",
+		Help: "Lifecycle event emissions suppressed by existing idempotency keys.",
 	})
 )
 
+// Delivery stages use bounded labels. Export call metrics are populated only
+// by observedExporter, never by the process-global SDK diagnostic handler.
+var (
+	AlertsValidated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alertreceiver_alerts_validated_total",
+		Help: "Valid alerts admitted to lifecycle processing, including repeats and stale notifications.",
+	}, []string{"transition"})
+	ProcessingOutcomes = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alertreceiver_processing_outcomes_total",
+		Help: "Individual alert processing outcomes; invalid HTTP batches are rejected before processing.",
+	}, []string{"outcome"})
+	EventsGenerated = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alertreceiver_events_generated_total",
+		Help: "Lifecycle transition events created after successful state operations, before emission deduplication.",
+	}, []string{"transition"})
+	OTLPExportRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alertreceiver_otlp_export_requests_total",
+		Help: "Underlying exporter calls by result, after exporter-managed retries; not network attempts or persistence confirmations.",
+	}, []string{"protocol", "result"})
+	OTLPExportRecords = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "alertreceiver_otlp_export_records_total",
+		Help: "Records passed to underlying exporter calls by call result; error counts do not imply all records were rejected or permanently lost.",
+	}, []string{"protocol", "result"})
+	OTLPExportDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "alertreceiver_otlp_export_duration_seconds",
+		Help:    "Underlying exporter call duration including exporter-managed retries.",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"protocol"})
+	OTelSDKErrors = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "alertreceiver_otel_sdk_errors_total",
+		Help: "Process-global OpenTelemetry error-handler diagnostics; may overlap export errors and must not be added to export failure counts.",
+	})
+)

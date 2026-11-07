@@ -3,6 +3,7 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,7 +13,9 @@ import (
 	"github.com/andersh/alertmanager_event_receiver/internal/telemetry"
 )
 
-// AlertProcessor processes a single alert instance.
+// AlertProcessor processes a single alert instance. Its value result describes
+// the processing outcome even when an error is returned (for example,
+// Indeterminate on a state failure or a detected transition on an emit failure).
 type AlertProcessor interface {
 	Process(ctx context.Context, alert models.Alert, groupKey, receiver, externalURL string) (processor.ProcessingResult, error)
 }
@@ -45,15 +48,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload models.WebhookPayload
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var payload *models.WebhookPayload
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&payload); err != nil {
 		h.logger.ErrorContext(r.Context(), "failed to decode webhook payload",
 			slog.String("remote_addr", r.RemoteAddr),
-			slog.Any("error", err),
+			slog.String("component", "webhook"), slog.String("operation", "decode"),
+			slog.String("error", telemetry.SafeError(err)),
 		)
 		statusCode = http.StatusBadRequest
 		http.Error(w, "bad request", statusCode)
 		return
+	}
+
+	if payload == nil {
+		h.logger.WarnContext(r.Context(), "invalid webhook payload", "component", "webhook", "operation", "validate", "error", "null payload")
+		statusCode = http.StatusBadRequest
+		http.Error(w, "bad request", statusCode)
+		return
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		h.logger.WarnContext(r.Context(), "invalid webhook payload", "component", "webhook", "operation", "decode", "error", "expected one JSON document")
+		statusCode = http.StatusBadRequest
+		http.Error(w, "bad request", statusCode)
+		return
+	}
+	// Validate the complete batch before any alert can mutate lifecycle state.
+	for _, alert := range payload.Alerts {
+		if err := processor.ValidateAlert(alert); err != nil {
+			h.logger.WarnContext(r.Context(), "invalid alert notification", "component", "webhook", "operation", "validate", "alert_fingerprint", alert.Fingerprint, "alert_transition", alert.Status, "error", telemetry.SafeError(err))
+			statusCode = http.StatusBadRequest
+			http.Error(w, "invalid alert notification", statusCode)
+			return
+		}
 	}
 
 	// A grouped webhook can contain both firing and resolved alerts, so report
@@ -71,6 +98,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.InfoContext(r.Context(), "webhook received",
+		slog.String("component", "webhook"), slog.String("operation", "receive"),
 		slog.String("group_key", payload.GroupKey),
 		slog.String("receiver", payload.Receiver),
 		slog.String("status", payload.Status),
@@ -83,12 +111,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	hadError := false
 	for _, alert := range payload.Alerts {
-		if _, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL); err != nil {
+		result, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL)
+		// Outcome metadata is independent of the error; ProcessingResult is a value,
+		// not a nullable success-only result. GoLand's success-only assumption does
+		// not apply to this API, which returns outcome metadata alongside errors.
+		//goland:noinspection GoDfaErrorMayBeNotNil
+		outcome, emissionStatus := string(result.Outcome), string(result.EventEmissionStatus)
+		if err != nil {
 			h.logger.ErrorContext(ctx, "failed to process alert",
-				slog.String("fingerprint", alert.Fingerprint),
-				slog.String("alertname", alert.Labels["alertname"]),
-				slog.String("status", alert.Status),
-				slog.Any("error", err),
+				slog.String("component", "webhook"), slog.String("operation", "process"),
+				slog.String("event_id", models.LifecycleEventID(alert.Fingerprint, alert.StartsAt, alert.Status)),
+				slog.String("alert_fingerprint", alert.Fingerprint), slog.String("alert_transition", alert.Status),
+				slog.String("outcome", outcome), slog.String("emission_status", emissionStatus),
+				slog.String("error", telemetry.SafeError(err)),
 			)
 			hadError = true
 		}
