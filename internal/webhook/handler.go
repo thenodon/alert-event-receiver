@@ -113,7 +113,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, alert := range payload.Alerts {
 		result, err := h.processor.Process(ctx, alert, payload.GroupKey, payload.Receiver, payload.ExternalURL)
 		// Outcome metadata is independent of the error; ProcessingResult is a value,
-		// not a nullable success-only result.
+		// not a nullable success-only result. GoLand's success-only assumption does
+		// not apply to this API, which returns outcome metadata alongside errors.
+		//goland:noinspection GoDfaErrorMayBeNotNil
 		outcome, emissionStatus := string(result.Outcome), string(result.EventEmissionStatus)
 		if err != nil {
 			h.logger.ErrorContext(ctx, "failed to process alert",
