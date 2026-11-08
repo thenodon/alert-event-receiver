@@ -122,6 +122,11 @@ func (p *Processor) Process(ctx context.Context, alert models.Alert, groupKey, r
 		if err := p.store.SetClosed(ctx, alert.Fingerprint, next, p.closedStateTTL); err != nil {
 			return p.stateFailure(ctx, alert, "set_closed", err)
 		}
+		if outcome == Closed {
+			// Measure successful lifecycle closure, not OTLP delivery. Observe before
+			// idempotency suppression or submission can return an error.
+			telemetry.AlertDurationSeconds.Observe(event.DurationSeconds)
+		}
 		if !same {
 			telemetry.ResolvedOrphansTotal.Inc()
 		}

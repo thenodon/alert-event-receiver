@@ -206,6 +206,7 @@ The receiver writes structured JSON logs to stdout. Its Prometheus metrics inclu
 |---|---|
 | `alertreceiver_webhook_requests_total` | Webhook requests by HTTP status class |
 | `alertreceiver_webhook_duration_seconds` | Webhook request latency |
+| `alertreceiver_alert_duration_seconds` | Histogram of durations for successfully closed matching occurrences, independent of OTLP emission |
 | `alertreceiver_events_emitted_total` | Emitter calls that returned nil (SDK submission), by transition; not confirmed queue retention or export |
 | `alertreceiver_emit_errors_total` | Synchronous emitter errors before successful submission, by transition |
 | `alertreceiver_redis_errors_total` | Redis operation errors |
@@ -355,6 +356,61 @@ sum by (transition) (rate(alertreceiver_events_emitted_total[5m]))
 # Repeat/stale notifications
 sum by (outcome) (rate(alertreceiver_processing_outcomes_total{outcome=~"repeated_.*|stale_.*"}[5m]))
 ```
+
+### Closed alert duration
+
+`alertreceiver_alert_duration_seconds` is an unlabelled histogram measuring
+`event.DurationSeconds` (`endsAt - startsAt`, in seconds) for the `Closed`
+lifecycle outcome. An observation is recorded only after the required Valkey
+closure write succeeds, before idempotency suppression or OTLP submission.
+It therefore includes closures whose emission is suppressed or fails, and does
+not establish successful OTLP delivery or backend persistence.
+
+Orphan resolutions, stale notifications, repeated resolutions, firing outcomes,
+and failed required state operations contribute no observations. A valid
+zero-duration closure contributes one observation of zero seconds. Only observed
+successful matching closures are counted; occurrences that close while the
+receiver is unavailable may not be represented. Existing concurrent-processing
+limitations still apply: this is not an exactly-once global incident count.
+
+Finite bucket boundaries in seconds are:
+`300, 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 259200, 604800`.
+Finite boundaries run from five minutes through seven days; the first
+`le="300"` bucket includes all durations up to five minutes, including zero and
+subsecond closures. Duration is measured from occurrence timestamps, independent
+of the Prometheus scrape interval. Count and sum retain exact observed durations;
+only quantile resolution becomes coarser below five minutes. The automatic
+`+Inf` bucket and count/sum also include durations beyond seven days. There are
+no alert-specific metric labels.
+
+The following queries aggregate all scraped receiver instances. Average and
+quantiles are in seconds; quantiles are estimates limited by the bucket layout.
+The average has no meaningful value when there are no observations in the window.
+
+```promql
+# Average duration of matching occurrences closed during the last 24 hours
+sum(rate(alertreceiver_alert_duration_seconds_sum[24h]))
+/
+sum(rate(alertreceiver_alert_duration_seconds_count[24h]))
+
+# Median (P50) duration
+histogram_quantile(0.50,
+  sum by (le) (rate(alertreceiver_alert_duration_seconds_bucket[24h]))
+)
+
+# P95 duration
+histogram_quantile(0.95,
+  sum by (le) (rate(alertreceiver_alert_duration_seconds_bucket[24h]))
+)
+
+# Successfully closed matching occurrences during the last 24 hours
+sum(increase(alertreceiver_alert_duration_seconds_count[24h]))
+```
+
+The count query excludes orphan resolutions and is a Prometheus extrapolated
+estimate, so it may be fractional. These process-local counters reset on restart;
+`rate` and `increase` handle observed resets. The histogram is separate from OTLP
+export latency (`alertreceiver_otlp_export_duration_seconds`).
 
 ### SDK diagnostics, batching and shutdown
 
