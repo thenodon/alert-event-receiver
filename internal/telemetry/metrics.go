@@ -78,6 +78,15 @@ var (
 		Buckets: []float64{60, 300, 900, 3600, 21600, 43200, 86400, 172800, 604800},
 	})
 
+	AlertDurationSeconds = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "alertreceiver_alert_duration_seconds",
+		Help: "Occurrence duration for Closed outcomes after successful state writes, independent of event emission; excludes orphan, repeated and stale resolutions.",
+		Buckets: []float64{
+			300, 600, 900, 1800,
+			3600, 7200, 14400, 21600, 43200, 86400, 172800, 259200, 604800,
+		},
+	})
+
 	// Duplicate suppression
 	DuplicatesDropped = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "alertreceiver_duplicates_dropped_total",
