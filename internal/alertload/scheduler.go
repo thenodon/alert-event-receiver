@@ -182,10 +182,14 @@ func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, jo
 	}
 	constructionStart := time.Now()
 	data, err := json.Marshal(PayloadFor(c, job.index, spec.status))
-	var request *http.Request
-	if err == nil {
-		request, err = http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(data))
+	if err != nil {
+		s.Lock()
+		s.report.Abandoned++
+		s.report.ConstructionErrors++
+		s.Unlock()
+		return
 	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.URL, bytes.NewReader(data))
 	if err != nil {
 		s.Lock()
 		s.report.Abandoned++
