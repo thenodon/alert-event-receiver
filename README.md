@@ -245,6 +245,11 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
+## Load testing
+
+See the [alertload guide](docs/alertload.md) for lifecycle load generation,
+configuration, safety precautions, and report interpretation.
+
 ## Development and releases
 
 ```bash
@@ -527,7 +532,9 @@ v0.2.0 focuses on best-effort delivery observability. It adds no persistent queu
 ## Repository layout
 
 ```text
-cmd/server/          Application entry point
+cmd/server/          Receiver entry point
+cmd/alertload/       Independent webhook lifecycle load generator
+internal/alertload/  Generator, bounded scheduler, HTTP workers and reports
 internal/config/     Environment configuration
 internal/models/     Alertmanager and lifecycle event models
 internal/processor/  Occurrence-aware lifecycle processing
