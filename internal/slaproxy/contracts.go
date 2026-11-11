@@ -1,0 +1,107 @@
+package slaproxy
+
+import (
+	"context"
+	"time"
+
+	"github.com/andersh/alertmanager_event_receiver/internal/models"
+)
+
+// PolicyRef identifies a policy within its independent label namespace.
+type PolicyRef struct {
+	SLALabel string
+	SLAValue string
+}
+
+// OccurrenceID retains Alertmanager's identity, without recomputing fingerprints.
+// Compare StartsAt with time.Time.Equal; serialize as UTC RFC3339Nano.
+type OccurrenceID struct {
+	Fingerprint string
+	StartsAt    time.Time
+}
+
+type Decision struct {
+	Eligible         bool
+	Reason           string
+	NextEvaluationAt time.Time
+	PolicyVersion    string
+}
+
+// PolicyEvaluator is a Phase 2 extension point, never called in Phase 1.
+type PolicyEvaluator interface {
+	Evaluate(ctx context.Context, input PolicyInput, policy PolicyRef, sinkID string, at time.Time) (Decision, error)
+}
+
+// PolicyInput separates optional enrichment metadata from original alert labels.
+type PolicyInput struct {
+	Alert      models.Alert
+	Enrichment Enrichment
+}
+
+// HolidayProvider receives a local calendar date in the policy's time zone.
+// Country/subdivision support and provider choice require Phase 2 approval.
+type HolidayProvider interface {
+	IsHoliday(ctx context.Context, localDate time.Time, country, subdivision string) (bool, error)
+}
+
+// PendingOccurrence is a read model, not a durable delivery state machine.
+type PendingOccurrence struct {
+	Alert            models.Alert
+	Policy           PolicyRef
+	SinkID           string
+	LastSeenAt       time.Time
+	NextEvaluationAt time.Time
+}
+
+// PendingState is deliberately read-only. Atomic acceptance, mutation, claims,
+// fencing and not-found semantics must be designed before Phase 3 implementation.
+type PendingState interface {
+	Lookup(ctx context.Context, occurrence OccurrenceID, sinkID string) (*PendingOccurrence, error)
+}
+
+// Scheduler implementations must define durable recovery/ownership in Phase 3.
+type Scheduler interface {
+	Run(context.Context) error
+}
+
+// DeliveryReceipt describes sink acceptance only, never workflow completion.
+type DeliveryReceipt struct {
+	Accepted bool
+}
+
+// DownstreamDelivery preserves the original webhook metadata and alerts. Its
+// payload, idempotency, durable intent and ordering contracts need Phase 4 review.
+// This interface has no implementation and is never invoked in Phase 1.
+type DownstreamDelivery interface {
+	Deliver(ctx context.Context, sinkID, idempotencyKey string, payload models.WebhookPayload) (DeliveryReceipt, error)
+}
+
+// Enrichment is separate metadata; it must not replace original labels/identity.
+type Enrichment map[string]string
+
+type Enricher interface {
+	Enrich(context.Context, models.Alert) (Enrichment, error)
+}
+
+type NoopEnricher struct{}
+
+func (NoopEnricher) Enrich(context.Context, models.Alert) (Enrichment, error) {
+	return nil, nil
+}
+
+// Select uses the first nonempty configured label. Unknown values never fall
+// through to a later definition. The reference is retained for diagnostics.
+func (c Config) Select(alert models.Alert) (PolicyRef, string) {
+	for _, def := range c.SLADefinitions {
+		value := alert.Labels[def.SLALabel]
+		if value == "" {
+			continue
+		}
+		ref := PolicyRef{SLALabel: def.SLALabel, SLAValue: value}
+		if _, exists := def.SLAs[value]; !exists {
+			return ref, "unknown_sla"
+		}
+		return ref, "selected"
+	}
+	return PolicyRef{}, "missing_sla_label"
+}

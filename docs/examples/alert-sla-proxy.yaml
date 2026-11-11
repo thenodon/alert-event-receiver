@@ -1,0 +1,31 @@
+# Phase 1: observation only. These schedules are validated but NOT enforced.
+listen_address: ":9012"
+webhook_path: /webhook
+max_body_bytes: 1048576
+shutdown_timeout: 10s
+
+sla_definitions:
+  - sla_label: sla_id
+    slas:
+      business-hours-se:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["08:00-12:00", "13:00-17:00"]
+          tuesday: ["08:00-17:00"]
+          wednesday: ["08:00-17:00"]
+          thursday: ["08:00-17:00"]
+          friday: ["08:00-17:00"]
+        holidays:
+          country: SE
+          additional_dates: ["2027-12-24"]
+  - sla_label: sla_name
+    slas:
+      # This name belongs to this entry; it does not reuse the policy above.
+      business-hours-se:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["09:00-18:00"]
+          tuesday: ["09:00-18:00"]
+          wednesday: ["09:00-18:00"]
+          thursday: ["09:00-18:00"]
+          friday: ["09:00-18:00"]

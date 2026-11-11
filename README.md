@@ -245,6 +245,29 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
+## Alert SLA Proxy (Phase 1)
+
+The separate `alert-sla-proxy` service validates Alertmanager webhooks and observes
+ordered, label-based SLA selection. It is stateless and observation-only: it does
+not enforce schedules, connect to Valkey, persist or forward alerts. Keep existing
+operational receivers active through test/fan-out routing. HTTP 200 acknowledges
+observation only, with explicit `persisted: false` and `forwarded: false` fields.
+
+```bash
+go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
+```
+
+The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz` and
+`/readyz`. Readiness represents observation capability only. YAML configuration
+is strictly validated; independent SLA maps preserve definition order. Missing
+selection labels and unknown SLA identifiers are counted per-alert skips.
+
+See the [SLA proxy guide](docs/alert-sla-proxy.md),
+[configuration example](docs/examples/alert-sla-proxy.yaml), and
+[decision register](docs/sla-proxy-decisions.md) for contracts and later-phase gates.
+Existing event receiver lifecycle, Valkey and OTLP behavior is unchanged.
+
 ## Load testing
 
 See the [alertload guide](docs/alertload.md) for lifecycle and weighted mixed load
@@ -535,6 +558,8 @@ v0.2.0 focuses on best-effort delivery observability. It adds no persistent queu
 ```text
 cmd/server/          Receiver entry point
 cmd/alertload/       Independent webhook lifecycle load generator
+cmd/alert-sla-proxy/ Independent observation-only SLA proxy
+internal/slaproxy/   SLA configuration, selection, HTTP service and metrics
 internal/alertload/  Generator, bounded scheduler, HTTP workers and reports
 internal/config/     Environment configuration
 internal/models/     Alertmanager and lifecycle event models
