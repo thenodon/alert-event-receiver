@@ -1,0 +1,8 @@
+scenario,weight,resolve_after
+firing,5,
+lifecycle,50,299s
+duplicates,20,300s
+orphans,5,0s
+stale,5,5m
+reopen,10,301s
+supersede,5,1h

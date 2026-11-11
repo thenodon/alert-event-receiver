@@ -1,0 +1,11 @@
+{
+  "profiles": [
+    {"scenario": "firing", "weight": 5},
+    {"scenario": "lifecycle", "weight": 50, "resolve_after": "299s"},
+    {"scenario": "duplicates", "weight": 20, "resolve_after": "300s"},
+    {"scenario": "orphans", "weight": 5, "resolve_after": "0s"},
+    {"scenario": "stale", "weight": 5, "resolve_after": "5m"},
+    {"scenario": "reopen", "weight": 10, "resolve_after": "301s"},
+    {"scenario": "supersede", "weight": 5, "resolve_after": "1h"}
+  ]
+}
