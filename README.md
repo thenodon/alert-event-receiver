@@ -43,7 +43,7 @@ Redis/Valkey stores **working state**, not complete historical events. Lifecycle
 
 ## Quick start
 
-Requirements: Go 1.26.10+, Redis or Valkey, and an OTLP-compatible log receiver.
+Requirements: Go 1.26.11+, Redis or Valkey, and an OTLP-compatible log receiver.
 
 ```bash
 # Build the application
@@ -262,7 +262,7 @@ go build -o alert_event_receiver ./cmd/server
 ./alert_event_receiver -version
 ```
 
-The repository uses Go 1.26, with Go 1.26.10 pinned in CI and image builds. GitHub Releases provide versioned builds; the `-version` flag prints the version injected at build time (or `unknown` when not set).
+The repository uses Go 1.26, with Go 1.26.11 pinned in CI and image builds. GitHub Releases provide versioned builds; the `-version` flag prints the version injected at build time (or `unknown` when not set).
 
 
 ## Delivery Semantics and Failure Handling
