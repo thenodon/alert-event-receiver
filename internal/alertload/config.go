@@ -21,28 +21,35 @@ const MaxPhaseRequests = 1_000_000
 // Config controls a run. Each nonempty phase has its own scheduling window.
 // The hard request limit bounds eligibility bitsets independently of run length.
 type Config struct {
-	URL              string        `json:"-"`
-	Rate             float64       `json:"target_requests_per_second"`
-	Duration         time.Duration `json:"-"`
-	BatchSize        int           `json:"batch_size"`
-	Workers          int           `json:"workers"`
-	Timeout          time.Duration `json:"-"`
-	MaxPending       int           `json:"max_pending"`
-	Scenario         string        `json:"scenario"`
-	ResolveAfter     time.Duration `json:"-"`
-	Seed             int64         `json:"seed"`
-	RunID            string        `json:"run_id"`
-	BaseTime         time.Time     `json:"base_time"`
-	Output           string        `json:"-"`
-	MaxResponseBytes int64         `json:"max_response_bytes"`
-	DrainTimeout     time.Duration `json:"-"`
-	AllowRemote      bool          `json:"allow_remote"`
-	MaxFailureRate   float64       `json:"max_failure_rate"`
-	FailOnDrop       bool          `json:"fail_on_drop"`
+	URL                string        `json:"-"`
+	Rate               float64       `json:"target_requests_per_second"`
+	Duration           time.Duration `json:"-"`
+	BatchSize          int           `json:"batch_size"`
+	Workers            int           `json:"workers"`
+	Timeout            time.Duration `json:"-"`
+	MaxPending         int           `json:"max_pending"`
+	Mix                string        `json:"mix,omitempty"`
+	ScenarioFile       string        `json:"-"`
+	MetricsURL         string        `json:"-"`
+	VictoriaLogsURL    string        `json:"-"`
+	ComparisonIsolated bool          `json:"comparison_isolated"`
+	CheckTimeout       time.Duration `json:"-"`
+	SettleTime         time.Duration `json:"-"`
+	Scenario           string        `json:"scenario"`
+	ResolveAfter       time.Duration `json:"-"`
+	Seed               int64         `json:"seed"`
+	RunID              string        `json:"run_id"`
+	BaseTime           time.Time     `json:"base_time"`
+	Output             string        `json:"-"`
+	MaxResponseBytes   int64         `json:"max_response_bytes"`
+	DrainTimeout       time.Duration `json:"-"`
+	AllowRemote        bool          `json:"allow_remote"`
+	MaxFailureRate     float64       `json:"max_failure_rate"`
+	FailOnDrop         bool          `json:"fail_on_drop"`
 }
 
 func DefaultConfig() Config {
-	return Config{URL: "http://127.0.0.1:9011/webhook", Rate: 10, Duration: time.Minute, BatchSize: 1, Workers: 10, Timeout: 10 * time.Second, MaxPending: 1000, Scenario: "lifecycle", ResolveAfter: 10 * time.Minute, Seed: 1, BaseTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), MaxResponseBytes: 4096, DrainTimeout: 10 * time.Second, FailOnDrop: true}
+	return Config{Mix: defaultMix, CheckTimeout: 5 * time.Second, SettleTime: time.Second, URL: "http://127.0.0.1:9011/webhook", Rate: 10, Duration: time.Minute, BatchSize: 1, Workers: 10, Timeout: 10 * time.Second, MaxPending: 1000, Scenario: "lifecycle", ResolveAfter: 10 * time.Minute, Seed: 1, BaseTime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC), MaxResponseBytes: 4096, DrainTimeout: 10 * time.Second, FailOnDrop: true}
 }
 
 func ParseConfig(args []string, stderr io.Writer) (Config, error) {
@@ -57,7 +64,14 @@ func ParseConfig(args []string, stderr io.Writer) (Config, error) {
 	fs.IntVar(&c.Workers, "workers", c.Workers, "fixed concurrent HTTP workers")
 	fs.DurationVar(&c.Timeout, "timeout", c.Timeout, "per-request timeout")
 	fs.IntVar(&c.MaxPending, "max-pending", c.MaxPending, "bounded pending request queue")
-	fs.StringVar(&c.Scenario, "scenario", c.Scenario, "firing, lifecycle, duplicates, orphans (Phase 1)")
+	fs.StringVar(&c.Mix, "mix", c.Mix, "weighted scenario cohorts for mixed: scenario=weight,...")
+	fs.StringVar(&c.ScenarioFile, "scenario-file", "", "JSON/CSV weighted cohort profiles; implies mixed")
+	fs.StringVar(&c.MetricsURL, "metrics-url", "", "optional receiver Prometheus exposition URL")
+	fs.StringVar(&c.VictoriaLogsURL, "victorialogs-url", "", "optional VictoriaLogs /select/logsql/query URL")
+	fs.BoolVar(&c.ComparisonIsolated, "comparison-isolated", false, "confirm dedicated receiver with no other traffic for metric comparison")
+	fs.DurationVar(&c.CheckTimeout, "check-timeout", c.CheckTimeout, "timeout for each verification HTTP call")
+	fs.DurationVar(&c.SettleTime, "settle-time", c.SettleTime, "bounded delay before final metric scrape/backend query")
+	fs.StringVar(&c.Scenario, "scenario", c.Scenario, "firing, lifecycle, duplicates, orphans, mixed, stale, reopen, supersede")
 	fs.DurationVar(&c.ResolveAfter, "resolve-after", c.ResolveAfter, "synthetic resolved duration; not a wall-clock delay")
 	fs.Int64Var(&c.Seed, "seed", c.Seed, "deterministic occurrence namespace seed")
 	fs.StringVar(&c.RunID, "run-id", "", "isolated namespace; generated if omitted")
@@ -70,6 +84,26 @@ func ParseConfig(args []string, stderr io.Writer) (Config, error) {
 	fs.BoolVar(&c.FailOnDrop, "fail-on-drop", true, "fail run on queue overflow or missed scheduling deadlines")
 	if err := fs.Parse(args); err != nil {
 		return c, err
+	}
+	explicitScenario, explicitMix := false, false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "scenario" {
+			explicitScenario = true
+		}
+		if f.Name == "mix" {
+			explicitMix = true
+		}
+	})
+	if c.ScenarioFile != "" {
+		if explicitMix {
+			return c, errors.New("scenario-file and explicit mix are mutually exclusive")
+		}
+		if !explicitScenario {
+			c.Scenario = "mixed"
+		}
+	}
+	if explicitMix && c.Scenario != "mixed" {
+		return c, errors.New("mix requires mixed scenario")
 	}
 	if fs.NArg() != 0 {
 		return c, errors.New("unexpected positional arguments")
@@ -126,9 +160,9 @@ func (c Config) Validate() error {
 		return errors.New("max-failure-rate must be finite and in 0..1")
 	}
 	switch c.Scenario {
-	case "firing", "lifecycle", "duplicates", "orphans":
+	case "firing", "lifecycle", "duplicates", "orphans", "mixed", "stale", "reopen", "supersede":
 	default:
-		return errors.New("unsupported Phase 1 scenario (choose firing, lifecycle, duplicates, orphans)")
+		return errors.New("unsupported alertload scenario")
 	}
 	if c.BaseTime.IsZero() {
 		return errors.New("base-time must be nonzero")
@@ -138,16 +172,26 @@ func (c Config) Validate() error {
 			return errors.New("synthetic timestamps exceed RFC3339 range")
 		}
 	}
-	u, err := url.Parse(c.URL)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" {
-		return errors.New("url must be an absolute HTTP(S) URL")
+	if c.ScenarioFile != "" && c.Mix != defaultMix {
+		return errors.New("scenario-file cannot be combined with custom mix")
 	}
-	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("URL credentials, query strings and fragments are not supported; do not put tokens in URLs")
+	if _, err := workloads(c); err != nil {
+		return err
 	}
-	if !c.AllowRemote && !isLoopback(u.Hostname()) {
-		return errors.New("non-loopback destination requires explicit -allow-remote")
+	if c.CheckTimeout <= 0 || c.CheckTimeout > time.Minute || c.SettleTime < 0 || c.SettleTime > time.Minute {
+		return errors.New("check-timeout must be positive and at most 1m; settle-time must be 0..1m")
 	}
+	if c.MetricsURL != "" && !c.ComparisonIsolated {
+		return errors.New("metrics-url requires comparison-isolated acknowledgement")
+	}
+	for _, endpoint := range []string{c.URL, c.MetricsURL, c.VictoriaLogsURL} {
+		if endpoint != "" {
+			if err := validateEndpoint(endpoint, c.AllowRemote); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 func (c Config) RequestsPerPhase() int { return int(math.Ceil(c.Rate * c.Duration.Seconds())) }
@@ -159,8 +203,13 @@ func isLoopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 func (c Config) Remote() bool {
-	u, err := url.Parse(c.URL)
-	return err == nil && !isLoopback(u.Hostname())
+	for _, endpoint := range []string{c.URL, c.MetricsURL, c.VictoriaLogsURL} {
+		u, err := url.Parse(endpoint)
+		if err == nil && u.Host != "" && !isLoopback(u.Hostname()) {
+			return true
+		}
+	}
+	return false
 }
 func (c Config) Endpoint() string {
 	u, err := url.Parse(c.URL)
@@ -169,3 +218,17 @@ func (c Config) Endpoint() string {
 	}
 	return u.Scheme + "://" + u.Host
 } // Never report paths, credentials or queries.
+
+func validateEndpoint(endpoint string, allowRemote bool) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" {
+		return errors.New("destination must be an absolute HTTP(S) URL")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return errors.New("URL credentials, query strings and fragments are not supported; do not put tokens in URLs")
+	}
+	if !allowRemote && !isLoopback(u.Hostname()) {
+		return errors.New("non-loopback destination requires explicit -allow-remote")
+	}
+	return nil
+}

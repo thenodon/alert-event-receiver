@@ -48,6 +48,13 @@ func PayloadFor(c Config, index int, status string) Payload {
 type phaseSpec struct {
 	name, status, outcome string
 	eligible, accepted    *bitset
+	profile               string
+	generation            int
+	resolveAfter          time.Duration
+	customTime            bool
+	cohorts               []byte
+	cohortID              byte
+	steps                 []phaseSpec
 }
 type bitset []uint64
 
@@ -57,12 +64,12 @@ func (b bitset) set(i int)      { b[i/64] |= uint64(1) << uint(i%64) }
 func plan(c Config, opened, closed *bitset) []phaseSpec {
 	switch c.Scenario {
 	case "firing":
-		return []phaseSpec{{"firing", "firing", "opened", nil, nil}}
+		return []phaseSpec{{name: "firing", status: "firing", outcome: "opened", profile: "firing"}}
 	case "orphans":
-		return []phaseSpec{{"orphans", "resolved", "resolved_without_open_state", nil, nil}}
+		return []phaseSpec{{name: "orphans", status: "resolved", outcome: "resolved_without_open_state", profile: "orphans"}}
 	case "lifecycle":
-		return []phaseSpec{{"firing", "firing", "opened", nil, opened}, {"resolved", "resolved", "closed", opened, closed}}
+		return []phaseSpec{{name: "firing", status: "firing", outcome: "opened", profile: "lifecycle", accepted: opened}, {name: "resolved", status: "resolved", outcome: "closed", profile: "lifecycle", eligible: opened, accepted: closed}}
 	default:
-		return []phaseSpec{{"firing", "firing", "opened", nil, opened}, {"repeated_firing", "firing", "repeated_firing", opened, nil}, {"resolved", "resolved", "closed", opened, closed}, {"repeated_resolved", "resolved", "repeated_resolved", closed, nil}}
+		return []phaseSpec{{name: "firing", status: "firing", outcome: "opened", profile: "duplicates", accepted: opened}, {name: "repeated_firing", status: "firing", outcome: "repeated_firing", profile: "duplicates", eligible: opened}, {name: "resolved", status: "resolved", outcome: "closed", profile: "duplicates", eligible: opened, accepted: closed}, {name: "repeated_resolved", status: "resolved", outcome: "repeated_resolved", profile: "duplicates", eligible: closed}}
 	}
 }

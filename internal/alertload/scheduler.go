@@ -36,8 +36,38 @@ func Run(ctx context.Context, c Config) (Report, error) {
 	client := &http.Client{Transport: transport, Timeout: c.Timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	opened, closed := newBitset(c.RequestsPerPhase()), newBitset(c.RequestsPerPhase())
 	specs := plan(c, &opened, &closed)
-	report.PlannedMaxRequests = uint64(len(specs) * c.RequestsPerPhase())
+	if c.Scenario == "mixed" || c.Scenario == "stale" || c.Scenario == "reopen" || c.Scenario == "supersede" {
+		var err error
+		specs, report.Workloads, err = buildPlan(c)
+		if err != nil {
+			return Report{}, err
+		}
+	} else {
+		report.Workloads = []Workload{{Scenario: c.Scenario, Weight: 1, ResolveAfter: c.ResolveAfter.String(), Cohorts: c.RequestsPerPhase()}}
+	}
+
+	for _, spec := range specs {
+		for i := 0; i < c.RequestsPerPhase(); i++ {
+			if _, ok := spec.at(i, false); ok {
+				report.PlannedMaxRequests++
+			}
+		}
+	}
 	report.PlannedMaxAlerts = report.PlannedMaxRequests * uint64(c.BatchSize)
+	var baseline snapshot
+	if c.MetricsURL != "" {
+		var err error
+		baseline, err = scrape(ctx, c)
+		if err != nil {
+			report.FailureReasons = append(report.FailureReasons, "metrics baseline scrape failed; no traffic sent")
+			report.MetricsComparison = &MetricsComparison{Status: "error", Reasons: []string{err.Error()}}
+			report.Interrupted = ctx.Err() != nil
+			report.finish(c, start)
+			return report, nil
+		}
+	}
+	start = time.Now()
+	report.StartedAt = start.UTC()
 	for _, spec := range specs {
 		if ctx.Err() != nil {
 			report.Interrupted = true
@@ -54,15 +84,31 @@ func Run(ctx context.Context, c Config) (Report, error) {
 		}
 	}
 	report.finish(c, start)
+	verify(ctx, c, &report, baseline)
 	return report, nil
 }
 
 func runPhase(ctx context.Context, c Config, client *http.Client, spec phaseSpec) PhaseReport {
 	start := time.Now()
 	n := c.RequestsPerPhase()
-	stats := &phaseState{report: PhaseReport{Name: spec.name, Transition: spec.status, ExpectedOutcome: spec.outcome, PlannedRequests: uint64(n), ResponseClasses: make(map[string]uint64)}}
+	stats := &phaseState{report: PhaseReport{Name: spec.name, Transition: spec.status, ExpectedOutcome: spec.outcome, ResponseClasses: make(map[string]uint64)}}
+	stats.report.EligibleOutcomes = make(map[string]uint64)
+	stats.report.SentOutcomes = make(map[string]uint64)
+	stats.report.AcceptedOutcomes = make(map[string]uint64)
+	stats.report.TransitionsSent = make(map[string]uint64)
+	stats.report.Profiles = make(map[string]*ProfileTraffic)
+	stats.report.ExpectedDurations = expectedHistogram(0, 0)
+
 	for i := 0; i < n; i++ {
-		if spec.eligible == nil || (*spec.eligible).has(i) {
+		if _, ok := spec.at(i, false); ok {
+			stats.report.PlannedRequests++
+		}
+		if step, ok := spec.at(i, true); ok {
+			stats.report.EligibleOutcomes[step.outcome] += uint64(c.BatchSize)
+			if stats.report.Profiles[step.profile] == nil {
+				stats.report.Profiles[step.profile] = &ProfileTraffic{ResponseClasses: make(map[string]uint64)}
+			}
+			stats.report.Profiles[step.profile].EligibleAlerts += uint64(c.BatchSize)
 			stats.report.EligibleRequests++
 		}
 	}
@@ -91,7 +137,7 @@ func runPhase(ctx context.Context, c Config, client *http.Client, spec phaseSpec
 	schedulingStart := time.Now()
 	ordinal := 0
 	for i := 0; i < n; i++ {
-		if spec.eligible != nil && !(*spec.eligible).has(i) {
+		if _, ok := spec.at(i, true); !ok {
 			continue
 		}
 		due := schedulingStart.Add(time.Duration(float64(ordinal) / c.Rate * float64(time.Second)))
@@ -174,6 +220,14 @@ func waitUntil(ctx context.Context, timer *time.Timer, due time.Time) bool {
 }
 
 func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, job task, s *phaseState) {
+	selected, ok := spec.at(job.index, true)
+	if !ok {
+		s.Lock()
+		s.report.Abandoned++
+		s.Unlock()
+		return
+	}
+	spec = selected
 	if ctx.Err() != nil {
 		s.Lock()
 		s.report.Abandoned++
@@ -181,7 +235,7 @@ func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, jo
 		return
 	}
 	constructionStart := time.Now()
-	data, err := json.Marshal(PayloadFor(c, job.index, spec.status))
+	data, err := json.Marshal(payloadForStep(c, job.index, spec))
 	if err != nil {
 		s.Lock()
 		s.report.Abandoned++
@@ -212,6 +266,9 @@ func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, jo
 	}
 	s.report.SentRequests++
 	s.report.SentAlerts += uint64(c.BatchSize)
+	s.report.TransitionsSent[spec.status] += uint64(c.BatchSize)
+	s.report.SentOutcomes[spec.outcome] += uint64(c.BatchSize)
+	s.report.Profiles[spec.profile].SentAlerts += uint64(c.BatchSize)
 	s.inflight++
 	s.report.PeakInflight = max(s.report.PeakInflight, s.inflight)
 	s.Unlock()
@@ -234,10 +291,20 @@ func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, jo
 		s.report.CompletedRequests++
 		class := response.StatusCode / 100
 		s.report.ResponseClasses[string(rune('0'+class))+"xx"]++
+		s.report.Profiles[spec.profile].ResponseClasses[string(rune('0'+class))+"xx"]++
 	}
 	accepted := err == nil && response != nil && response.StatusCode >= 200 && response.StatusCode < 300
 	if accepted {
 		s.report.SuccessfulRequests++
+		s.report.AcceptedOutcomes[spec.outcome] += uint64(c.BatchSize)
+		s.report.Profiles[spec.profile].AcceptedAlerts += uint64(c.BatchSize)
+		if spec.outcome == "closed" {
+			duration := c.ResolveAfter
+			if spec.customTime {
+				duration = spec.resolveAfter
+			}
+			s.report.ExpectedDurations.observe(duration.Seconds(), uint64(c.BatchSize))
+		}
 		s.report.AcceptedAlerts += uint64(c.BatchSize)
 		if spec.accepted != nil {
 			(*spec.accepted).set(job.index)
@@ -245,15 +312,18 @@ func send(ctx context.Context, c Config, client *http.Client, spec phaseSpec, jo
 		return
 	}
 	s.report.FailedRequests++
+	s.report.Profiles[spec.profile].FailedRequests++
 	if err != nil {
 		var netErr net.Error
 		switch {
 		case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
 			s.report.Timeouts++
+			s.report.Profiles[spec.profile].Timeouts++
 		case errors.Is(err, context.Canceled):
 			s.report.CanceledRequests++
 		default:
 			s.report.NetworkErrors++
+			s.report.Profiles[spec.profile].NetworkErrors++
 		}
 	}
 	if err == nil && response != nil && response.StatusCode >= 400 && response.StatusCode < 500 {

@@ -1,4 +1,4 @@
-# Load testing with `alertload` (Phase 1)
+# Load testing with `alertload` (Phases 1 and 2)
 
 `alertload` is an independent, standard-library HTTP client for generating
 Alertmanager-compatible webhook traffic. It does not import receiver processor
@@ -35,6 +35,10 @@ not one ten-second window shared between both phases.
 | `lifecycle` | Firing → matching resolved |
 | `duplicates` | Firing → repeated firing → matching resolved → repeated resolved |
 | `orphans` | Resolved occurrences with no preceding firing |
+| `stale` | Newer firing → older firing → older resolved → matching newer resolved |
+| `reopen` | Firing → resolved → newer firing with same fingerprint → matching newer resolved |
+| `supersede` | Firing → newer firing with same fingerprint → older resolved → matching newer resolved |
+| `mixed` | Deterministically interleaved weighted cohorts of any of the seven profiles |
 
 A phase completes before the next begins, including its HTTP requests and bounded
 drain. Only original firing batches with a completed HTTP 2xx result are eligible
@@ -50,7 +54,8 @@ and resolution. Occurrence timestamps start at `-base-time` and advance by one
 nanosecond per alert index. Fingerprints are deterministic hashes of run ID,
 seed, and occurrence index. Repeated transitions reuse the same labels,
 fingerprint and startsAt. The seed namespaces identities; it does not introduce
-random timing or a random duration distribution in Phase 1.
+random request timing. Mixed-cohort assignment is shuffled with the seed, and
+scenario files can choose a different fixed synthetic duration for each profile.
 
 The default base time is fixed at `2026-01-01T00:00:00Z`, independent of the wall
 clock. The same seed, base time, run ID and batch size generate identical planned
@@ -77,7 +82,7 @@ retention window: synthetic timestamps can fall in the past or future.
 | `-workers` | `10` | Fixed maximum simultaneous requests |
 | `-timeout` | `10s` | Timeout per HTTP request, including response reading |
 | `-max-pending` | `1000` | Maximum queued request descriptors |
-| `-scenario` | `lifecycle` | Phase 1 scenario from the table above |
+| `-scenario` | `lifecycle` | Scenario from the table above |
 | `-resolve-after` | `10m` | Synthetic resolution duration; zero is valid |
 | `-seed` | `1` | Deterministic identity seed |
 | `-base-time` | `2026-01-01T00:00:00Z` | RFC3339Nano synthetic timestamp base |
@@ -94,8 +99,7 @@ are allowed by default. Redirects are never followed. URL credentials, query
 strings and fragments are rejected. Reports include only the endpoint's scheme
 and host, excluding its path. Response bodies and raw transport error text are
 not reported, avoiding accidental disclosure of tokens echoed by a server.
-Custom authentication headers and proxy configuration are not implemented in
-Phase 1; use a dedicated directly reachable test endpoint.
+Custom authentication headers and proxy configuration are not implemented; use a dedicated directly reachable test endpoint.
 
 ## Scheduling, bounds and report interpretation
 
@@ -106,8 +110,9 @@ Workers construct and marshal payloads only after dequeueing a small request
 descriptor. The tool retains no unbounded payload pool or latency sample list.
 
 The plan is limited to **1,000,000 requests per phase** (`ceil(rate × duration)`).
-Two compact eligibility bitsets retain successful batch indices, bounded to about
-250 KB in total at the limit. Latency/size recorders use fixed logarithmic
+Phase 1 uses two compact eligibility bitsets (about 250 KB at the limit).
+Phase 2 additionally uses a one-byte-per-cohort assignment and at most 28
+success bitsets, about 4.5 MB of planning state at the limit. Latency/size recorders use fixed logarithmic
 histograms. Rate is limited to 1,000,000 requests/second; scheduling windows,
 request timeouts and drain graces are at most 24 hours; batch size is 1–10,000,
 workers 1–1,024, workers × batch size at most 1,000,000, pending descriptors at
@@ -161,6 +166,164 @@ sum by (le) (increase(alertreceiver_alert_duration_seconds_bucket[10m]))
 ```
 
 Account for scrape timing, resets and extrapolation when comparing counters.
-The tool does not scrape Prometheus automatically. Weighted `mixed` workloads,
-stale/reopen/supersede profiles, scenario files, real Alertmanager API traffic,
-real-time lifecycle sleeps and backend persistence checks are later phases.
+By default, the tool makes no verification requests; the optional Phase 2 checks
+below require explicit flags. Real Alertmanager API traffic and real-time
+lifecycle sleeps remain out of scope.
+
+
+## Phase 2: weighted profiles and scenario files
+
+```bash
+go run ./cmd/alertload \
+  -scenario mixed \
+  -mix 'firing=5,lifecycle=50,duplicates=20,orphans=5,stale=5,reopen=10,supersede=5' \
+  -rate 50 -duration 2s -batch-size 10 -workers 10 \
+  -resolve-after 5m \
+  -base-time "$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -output /tmp/alertload-mixed-report.json
+```
+
+Weights apply to **initial fingerprint/batch cohorts**, not percentages of HTTP
+requests, alert status, or valid closures. The root cohort count remains
+`ceil(rate × duration)`. Counts are apportioned by largest remainder with stable
+scenario-name tie-breaking, then assigned to batch indices by a seeded shuffle.
+Small runs can allocate zero cohorts to low-weight profiles. The default mix is
+`firing=1,lifecycle=1,duplicates=1,orphans=1`.
+
+Profiles with more transitions produce more traffic: a firing cohort produces
+one request, a lifecycle cohort two, and a duplicates/stale/reopen/supersede cohort
+four. Reports include weights, exact planned cohort allocations, and actual
+per-round/profile traffic rather than claiming that request proportions equal
+input weights. At most one step per cohort is sent in each of four rounds, using
+the existing total request rate for that round, not a separate rate per profile.
+Homogeneous request batches can be interleaved with other statuses in that round.
+A round completes and drains before any dependent step is scheduled. Sparse later
+rounds retain their scheduling window; completely empty rounds are skipped.
+
+The new profiles deliberately exercise these expected outcomes:
+
+- `stale`: opened, stale_firing, stale_resolved, closed. Its initial firing belongs
+  to generation 1; generation 0 notifications arrive later and must be ignored.
+- `reopen`: opened, closed, reopened, closed. Both successful matching closures
+  contribute expected duration observations.
+- `supersede`: opened, superseded_firing, stale_resolved, closed. No resolution is
+  synthesized for the superseded generation, and its late resolve is stale.
+
+Generation 1 retains the same fingerprint/labels and has startsAt equal to
+generation 0 startsAt plus its synthetic resolution duration plus one second.
+Only startsAt/endsAt change between generations. Every dependent Phase 2 step is
+conservatively gated on **all preceding steps in that profile returning 2xx**.
+This includes repeated/stale steps: a failure reduces later coverage instead of
+making an authoritative assumption about the receiver. Existing standalone Phase
+1 profiles keep their original gating behavior. No failed request is retried.
+
+Use `-scenario-file` to load weighted profiles from
+[JSON](examples/alertload-mixed.json) or [CSV](examples/alertload-mixed.csv):
+
+```bash
+go run ./cmd/alertload \
+  -scenario-file docs/examples/alertload-mixed.json \
+  -rate 50 -duration 2s -batch-size 10 \
+  -base-time "$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -output /tmp/alertload-file-report.json
+```
+
+A scenario file implies `-scenario mixed` unless an explicit scenario was supplied;
+other explicit scenarios are rejected. Files and an explicit `-mix` cannot be
+combined. JSON accepts a single object with a `profiles` array; each profile has
+`scenario`, positive integer `weight`, and optional duration-string `resolve_after`.
+CSV requires the exact header `scenario,weight,resolve_after`; leave the duration
+cell empty to inherit `-resolve-after`. There must be one to seven unique supported
+profiles, weights are 1..1,000,000, unknown JSON fields are rejected, and files are
+limited to 1 MiB. Input is validated before network traffic. Equivalent CSV/JSON
+profiles produce the same plan independently of input row order.
+
+Per-profile durations are reflected in the report's expected count, sum, and
+cumulative histogram buckets, including zero and greater-than-seven-day values.
+The existing `occurrences_planned` field counts initial fingerprint cohorts;
+`occurrence_generations_planned` counts distinct fingerprint/startsAt generations
+that appear in the full plan (including deliberately stale generations).
+`workloads`, per-phase `profiles`, expected outcomes and verification results are
+additive JSON schema version 1 fields.
+
+**Timestamp warning:** a reopen/supersede profile may place its final resolved
+record at `base-time + 2 × resolve-after + 1s`, plus the tiny per-alert nanosecond
+offset. Stale profiles also use this newer generation. Choose a base time that
+keeps all desired records within the backend's retention/query range and outside
+the future. No conversion to wall-clock event time is performed.
+
+## Optional receiver metric comparison
+
+```bash
+go run ./cmd/alertload \
+  -scenario lifecycle -rate 10 -duration 2s -resolve-after 5m \
+  -base-time "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -metrics-url http://127.0.0.1:9011/metrics \
+  -comparison-isolated -settle-time 2s -check-timeout 5s \
+  -output /tmp/alertload-verified.json
+```
+
+`-metrics-url` is a direct receiver Prometheus **text exposition** endpoint, not
+a Prometheus query API. `-comparison-isolated` is mandatory: metrics have no run-ID
+labels, so the operator must provide a dedicated receiver with no concurrent
+traffic and fresh identities/state. This flag acknowledges isolation; the tool
+cannot enforce it. Baseline failure stops the run before sending load.
+
+The tool scrapes once before traffic and once after traffic/drain and the optional
+settle delay. It computes counter deltas and checks HTTP 2xx/4xx/5xx counts,
+lifecycle outcome counts, generated events, SDK submissions, and matching duration
+count/sum/buckets against conditional expectations. Bucket label numbers such as
+`300` and `300.0` are normalized. Valkey, synchronous emission, and OTLP export
+error counters are also reported as measurements; they are not equated with
+permanent loss or backend delivery and are not automatically required to be zero.
+
+Comparisons report `matched`, `mismatch`, `inconclusive`, or `error`. Failed,
+dropped, abandoned or interrupted traffic makes correctness comparison
+inconclusive, even if the configured HTTP failure/drop policy tolerates it.
+Counter decreases, disappearing nonzero series, or changed exposed process-start
+time also invalidate comparison. Resets that are hidden by a missing process-start
+metric and later counter growth cannot be reliably detected. Unexpected concurrent
+traffic may appear as a mismatch. A matching comparison is evidence for observed
+counter deltas, not proof of OTLP export or persistence.
+
+## Optional VictoriaLogs visibility check
+
+```bash
+go run ./cmd/alertload \
+  -scenario lifecycle -rate 10 -duration 2s -resolve-after 5m \
+  -base-time "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \
+  -victorialogs-url http://127.0.0.1:9428/select/logsql/query \
+  -settle-time 3s -check-timeout 5s \
+  -output /tmp/alertload-victorialogs.json
+```
+
+The tool makes one read-only POST query using the exact run label and event kind:
+
+```logsql
+event.kind:="alert_transition" alert.label.load_run:="<run-id>"
+| stats by (alert.transition) count() total
+```
+
+The JSON-lines response is compared against expected firing and resolved record
+counts (opened/reopened/superseded firing events, and closed/orphan resolutions).
+No time filter is imposed: the fresh run ID scopes the query across retained
+synthetic event times. This is an **aggregate query-time visibility check**, not
+per-event ID validation, a durability test, or an exactly-once guarantee. Reused
+run IDs, expired/future timestamps, exporter failure, ingestion delay or a wrong
+tenant can produce a mismatch. The check uses the default tenant; custom auth or
+tenant headers are not supported. Ambiguous workload failures skip this query
+and report inconclusive rather than asserting an exact expected backend count.
+See the [VictoriaLogs query API](https://docs.victoriametrics.com/victorialogs/querying/).
+
+Both checks are opt-in and can be combined. All verification destinations obey
+`-allow-remote`, reject URL credentials/query strings/fragments, and refuse
+redirects just like the load endpoint. Server response/error text is not embedded
+in reports. Responses are limited to 4 MiB, metric lines to 64 KiB and selected
+series to 4,096. Only known receiver metrics and bounded label values are retained.
+
+`-settle-time` defaults to 1s and permits 0..1m; it is applied once before final
+verification. `-check-timeout` defaults to 5s and permits up to 1m per HTTP check.
+There is no polling, automatic retry, replay, or guaranteed wait for eventual
+export. A mismatch/error/inconclusive requested check makes the command exit
+nonzero. Workload wall time and rate denominators exclude verification;
+`verification_seconds` reports the additional elapsed verification time.

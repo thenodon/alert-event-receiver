@@ -247,8 +247,9 @@ Adjust field names and stream settings to match your OTLP ingestion configuratio
 
 ## Load testing
 
-See the [alertload guide](docs/alertload.md) for lifecycle load generation,
-configuration, safety precautions, and report interpretation.
+See the [alertload guide](docs/alertload.md) for lifecycle and weighted mixed load
+generation, CSV/JSON profiles, optional receiver/VictoriaLogs checks, safety
+precautions, and report interpretation.
 
 ## Development and releases
 

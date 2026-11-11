@@ -3,6 +3,7 @@ package alertload
 import (
 	"math"
 	"sort"
+	"strconv"
 )
 
 // recorder uses a fixed logarithmic histogram, never retaining raw samples.
@@ -87,4 +88,33 @@ func sortedKeys(m map[string]uint64) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func (h *ExpectedHistogram) merge(other ExpectedHistogram) {
+	h.Count += other.Count
+	h.Sum += other.Sum
+	if h.Buckets == nil {
+		h.Buckets = expectedHistogram(0, 0).Buckets
+	}
+	for k, v := range other.Buckets {
+		h.Buckets[k] += v
+	}
+}
+
+func (h *ExpectedHistogram) observe(seconds float64, count uint64) {
+	if h.Buckets == nil {
+		h.Buckets = expectedHistogram(0, 0).Buckets
+	}
+	h.Count += count
+	h.Sum += seconds * float64(count)
+	for le := range h.Buckets {
+		if le == "+Inf" {
+			h.Buckets[le] += count
+			continue
+		}
+		bound, _ := strconv.ParseFloat(le, 64)
+		if seconds <= bound {
+			h.Buckets[le] += count
+		}
+	}
 }

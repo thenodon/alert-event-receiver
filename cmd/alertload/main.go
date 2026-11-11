@@ -31,7 +31,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if cfg.Remote() {
 		fmt.Fprintln(stderr, "WARNING: REMOTE LOAD ENABLED. Requests modify receiver state and may create downstream events. Use a dedicated test receiver and Valkey instance.")
 	}
-	fmt.Fprintf(stderr, "alertload run=%s target=%s scenario=%s; duration applies to EACH phase; synthetic resolve-after=%s\n", cfg.RunID, cfg.Endpoint(), cfg.Scenario, cfg.ResolveAfter)
+	fmt.Fprintf(stderr, "alertload run=%s target=%s scenario=%s; duration applies to EACH phase; default synthetic resolve-after=%s\n", cfg.RunID, cfg.Endpoint(), cfg.Scenario, cfg.ResolveAfter)
 	report, err := alertload.Run(ctx, cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, "alertload:", err)

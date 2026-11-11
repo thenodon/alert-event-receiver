@@ -18,7 +18,7 @@ func TestConfigValidation(t *testing.T) {
 		{"batch", func(c *Config) { c.BatchSize = 0 }}, {"workers", func(c *Config) { c.Workers = 0 }}, {"queue", func(c *Config) { c.MaxPending = 0 }},
 		{"timeout", func(c *Config) { c.Timeout = 0 }}, {"drain", func(c *Config) { c.DrainTimeout = 0 }}, {"negative duration", func(c *Config) { c.ResolveAfter = -1 }},
 		{"unsafe ID", func(c *Config) { c.RunID = "../../escape" }}, {"long ID", func(c *Config) { c.RunID = strings.Repeat("a", 65) }},
-		{"mixed is phase2", func(c *Config) { c.Scenario = "mixed" }}, {"remote", func(c *Config) { c.URL = "https://example.com/webhook" }},
+		{"unknown profile", func(c *Config) { c.Scenario = "unknown" }}, {"remote", func(c *Config) { c.URL = "https://example.com/webhook" }},
 		{"userinfo", func(c *Config) { c.URL = "http://user:private-token@localhost/webhook" }}, {"query", func(c *Config) { c.URL = "http://localhost/webhook?token=private-token" }},
 		{"scheme", func(c *Config) { c.URL = "file:///tmp/webhook" }}, {"body cap", func(c *Config) { c.MaxResponseBytes = 2 << 20 }},
 		{"failure rate", func(c *Config) { c.MaxFailureRate = 1.1 }}, {"failure nan", func(c *Config) { c.MaxFailureRate = math.NaN() }},
