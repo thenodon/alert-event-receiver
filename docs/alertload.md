@@ -15,7 +15,8 @@ go build -o /tmp/alertload ./cmd/alertload
   -scenario lifecycle \
   -rate 100 -duration 10s -batch-size 10 -workers 20 \
   -resolve-after 1h \
-  -seed 42 -base-time 2026-11-09T10:00:00Z \
+  -seed 42 \
+  -base-time "$(date -u -d '65 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" \
   -run-id bench-20261109-a \
   -output /tmp/alertload-report.json
 ```
