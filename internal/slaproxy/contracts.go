@@ -27,7 +27,7 @@ type Decision struct {
 	PolicyVersion    string
 }
 
-// PolicyEvaluator is a Phase 2 extension point, never called in Phase 1.
+// PolicyEvaluator observes eligibility, without persisting or delivering alerts.
 type PolicyEvaluator interface {
 	Evaluate(ctx context.Context, input PolicyInput, policy PolicyRef, sinkID string, at time.Time) (Decision, error)
 }
@@ -38,9 +38,12 @@ type PolicyInput struct {
 	Enrichment Enrichment
 }
 
-// HolidayProvider receives a local calendar date in the policy's time zone.
-// Country/subdivision support and provider choice require Phase 2 approval.
+// HolidayProvider receives a civil date: only Year/Month/Day are meaningful.
+// It must not reinterpret that date by converting its time zone. Implementations
+// validate coverage at startup and must support concurrent evaluation.
 type HolidayProvider interface {
+	Version() string
+	Validate(country, subdivision string) error
 	IsHoliday(ctx context.Context, localDate time.Time, country, subdivision string) (bool, error)
 }
 
@@ -71,7 +74,7 @@ type DeliveryReceipt struct {
 
 // DownstreamDelivery preserves the original webhook metadata and alerts. Its
 // payload, idempotency, durable intent and ordering contracts need Phase 4 review.
-// This interface has no implementation and is never invoked in Phase 1.
+// This interface has no implementation and is never invoked in Phases 1 or 2.
 type DownstreamDelivery interface {
 	Deliver(ctx context.Context, sinkID, idempotencyKey string, payload models.WebhookPayload) (DeliveryReceipt, error)
 }

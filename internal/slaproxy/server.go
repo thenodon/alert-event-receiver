@@ -16,12 +16,14 @@ import (
 // Service owns an independent configuration, registry and HTTP lifecycle.
 // It has no dependency on receiver processing, receiver telemetry or Valkey.
 type Service struct {
-	cfg      Config
-	logger   *slog.Logger
-	metrics  *metrics
-	enricher NoopEnricher
-	ready    atomic.Bool
-	handler  http.Handler
+	cfg       Config
+	logger    *slog.Logger
+	metrics   *metrics
+	enricher  NoopEnricher
+	evaluator PolicyEvaluator
+	now       func() time.Time
+	ready     atomic.Bool
+	handler   http.Handler
 }
 
 func New(cfg Config, logger *slog.Logger) (*Service, error) {
@@ -32,6 +34,11 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 	s := &Service{cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
+	engine, err := NewCalendarEngine(cfg, observedHolidays{provider: CountryHolidays{}, metrics: s.metrics})
+	if err != nil {
+		return nil, err
+	}
+	s.evaluator, s.now = engine, time.Now
 	s.ready.Store(true)
 	mux := http.NewServeMux()
 	mux.HandleFunc(cfg.WebhookPath, s.webhook)
@@ -71,7 +78,7 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 		IdleTimeout: 60 * time.Second,
 	}
 	s.logger.Warn("SLA proxy observation mode: alerts are not persisted or forwarded",
-		"component", "sla_proxy", "mode", "observe_only", "schedules_enforced", false)
+		"component", "sla_proxy", "mode", "observe_only", "calendar_evaluation", true, "delivery_enforced", false)
 	s.logger.Info("starting HTTP server", "component", "http", "operation", "serve", "addr", listener.Addr().String())
 	done := make(chan error, 1)
 	go func() { done <- server.Serve(listener) }()

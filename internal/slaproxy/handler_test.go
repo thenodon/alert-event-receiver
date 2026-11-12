@@ -294,7 +294,7 @@ func TestNoopEnrichmentAndWireIdentityPreserved(t *testing.T) {
 		t.Fatal("no-op changed labels", err)
 	}
 	s := newTestService(t)
-	// Phase 1 observes every notification, even repeated occurrences, and does
+	// Observe-only processing includes every notification, even repeats, and does
 	// not check whether their synthetic timestamps are inside an SLA window.
 	for i := 0; i < 2; i++ {
 		if w := post(s, data); w.Code != 200 {

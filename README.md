@@ -245,13 +245,17 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
-## Alert SLA Proxy (Phase 1)
+## Alert SLA Proxy (Phase 2)
 
-The separate `alert-sla-proxy` service validates Alertmanager webhooks and observes
-ordered, label-based SLA selection. It is stateless and observation-only: it does
-not enforce schedules, connect to Valkey, persist or forward alerts. Keep existing
-operational receivers active through test/fan-out routing. HTTP 200 acknowledges
-observation only, with explicit `persisted: false` and `forwarded: false` fields.
+The separate `alert-sla-proxy` service validates Alertmanager webhooks, selects
+independent label-based SLA policies, and classifies each occurrence using its
+`startsAt`, with the next eligible instant relative to that start time. It
+evaluates IANA weekly schedules and optional public
+holidays for Sweden, Germany nationally, or Bavaria, plus explicit dates.
+It remains stateless: it does not connect to Valkey, persist, schedule or forward
+alerts. Keep existing operational receivers active through test/fan-out routing.
+HTTP 200 acknowledges observation only, with explicit `persisted: false` and
+`forwarded: false` fields. Runtime evaluation failures return HTTP 500.
 
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
@@ -260,8 +264,10 @@ go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
 
 The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz` and
 `/readyz`. Readiness represents observation capability only. YAML configuration
-is strictly validated; independent SLA maps preserve definition order. Missing
-selection labels and unknown SLA identifiers are counted per-alert skips.
+is strictly validated, including calendar coverage and cross-weekday overlaps;
+independent SLA maps preserve definition order. Missing selection labels and
+unknown SLA identifiers are counted per-alert skips. Responses include per-policy
+eligibility observations and next times; these do not create scheduled work.
 
 See the [SLA proxy guide](docs/alert-sla-proxy.md),
 [configuration example](docs/examples/alert-sla-proxy.yaml), and
@@ -549,7 +555,7 @@ inspection and idempotency troubleshooting.
 
 ## Current limitations and roadmap
 
-This version intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis.
+The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy evaluates calendars in observation mode; its scheduling and delivery remain deferred.
 
 v0.2.0 focuses on best-effort delivery observability. It adds no persistent queue, retries, replay, policies, or sinks.
 
@@ -559,7 +565,7 @@ v0.2.0 focuses on best-effort delivery observability. It adds no persistent queu
 cmd/server/          Receiver entry point
 cmd/alertload/       Independent webhook lifecycle load generator
 cmd/alert-sla-proxy/ Independent observation-only SLA proxy
-internal/slaproxy/   SLA configuration, selection, HTTP service and metrics
+internal/slaproxy/   SLA configuration, calendar evaluation, HTTP service and metrics
 internal/alertload/  Generator, bounded scheduler, HTTP workers and reports
 internal/config/     Environment configuration
 internal/models/     Alertmanager and lifecycle event models

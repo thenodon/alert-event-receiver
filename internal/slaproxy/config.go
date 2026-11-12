@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/url"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -18,11 +17,12 @@ import (
 
 // Config is independent of the event receiver's environment configuration.
 type Config struct {
-	ListenAddress   string        `yaml:"listen_address"`
-	WebhookPath     string        `yaml:"webhook_path"`
-	MaxBodyBytes    int64         `yaml:"max_body_bytes"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
-	SLADefinitions  []Definition  `yaml:"sla_definitions"`
+	ListenAddress         string        `yaml:"listen_address"`
+	WebhookPath           string        `yaml:"webhook_path"`
+	MaxBodyBytes          int64         `yaml:"max_body_bytes"`
+	ShutdownTimeout       time.Duration `yaml:"shutdown_timeout"`
+	EvaluationHorizonDays int           `yaml:"evaluation_horizon_days"`
+	SLADefinitions        []Definition  `yaml:"sla_definitions"`
 }
 
 // Definition owns its policy namespace. SLA names may repeat across definitions.
@@ -31,7 +31,7 @@ type Definition struct {
 	SLAs     map[string]Policy `yaml:"slas"`
 }
 
-// Policy is parsed and validated but never evaluated in Phase 1.
+// Policy is evaluated independently within its definition's namespace.
 type Policy struct {
 	Timezone string              `yaml:"timezone"`
 	Schedule map[string][]string `yaml:"schedule"`
@@ -48,7 +48,7 @@ type Holidays struct {
 func LoadConfig(r io.Reader) (Config, error) {
 	cfg := Config{
 		ListenAddress: ":9012", WebhookPath: "/webhook",
-		MaxBodyBytes: 1 << 20, ShutdownTimeout: 10 * time.Second,
+		MaxBodyBytes: 1 << 20, ShutdownTimeout: 10 * time.Second, EvaluationHorizonDays: 370,
 	}
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -98,6 +98,9 @@ func (c Config) Validate() error {
 	if len(c.SLADefinitions) == 0 {
 		return fmt.Errorf("at least one sla_definitions entry is required")
 	}
+	if c.EvaluationHorizonDays < 1 || c.EvaluationHorizonDays > 3660 {
+		return fmt.Errorf("evaluation_horizon_days must be between 1 and 3660")
+	}
 	seen := make(map[string]bool)
 	for i, def := range c.SLADefinitions {
 		if !labelName.MatchString(def.SLALabel) || seen[def.SLALabel] {
@@ -129,44 +132,15 @@ func validatePolicy(p Policy) error {
 	if len(p.Schedule) == 0 {
 		return fmt.Errorf("schedule must contain at least one weekday")
 	}
-	for day, windows := range p.Schedule {
-		switch day {
-		case "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday":
-		default:
-			return fmt.Errorf("invalid weekday %q", day)
-		}
-		// Anchor intervals to this weekday for overlap validation. An overnight
-		// end is on the following day; cross-weekday evaluation remains Phase 2.
-		type interval struct{ start, end int }
-		var intervals []interval
-		for _, window := range windows {
-			parts := strings.Split(window, "-")
-			if len(parts) != 2 {
-				return fmt.Errorf("invalid time window %q", window)
-			}
-			start, e1 := clockMinutes(parts[0], false)
-			end, e2 := clockMinutes(parts[1], true)
-			if e1 != nil || e2 != nil || start == end {
-				return fmt.Errorf("invalid time window %q", window)
-			}
-			if end < start {
-				end += 1440
-			}
-			intervals = append(intervals, interval{start, end})
-		}
-		sort.Slice(intervals, func(i, j int) bool { return intervals[i].start < intervals[j].start })
-		for i := 1; i < len(intervals); i++ {
-			if intervals[i].start < intervals[i-1].end {
-				return fmt.Errorf("overlapping windows for %s", day)
-			}
-		}
+	if _, err := compileSchedule(p.Schedule); err != nil {
+		return err
 	}
 	if h := p.Holidays; h != nil {
 		if h.Country == "" && (h.Subdivision != "" || len(h.AdditionalDates) == 0) {
 			return fmt.Errorf("holidays requires country or additional_dates; subdivision requires country")
 		}
 		if h.Country != "" && (len(h.Country) != 2 || h.Country[0] < 'A' || h.Country[0] > 'Z' || h.Country[1] < 'A' || h.Country[1] > 'Z') {
-			return fmt.Errorf("holiday country must have two uppercase ASCII letters; coverage is not checked yet")
+			return fmt.Errorf("holiday country must have two uppercase ASCII letters")
 		}
 		for _, date := range h.AdditionalDates {
 			parsed, err := time.Parse("2006-01-02", date)

@@ -47,7 +47,7 @@ func testConfig(t *testing.T) Config {
 
 func TestConfigDefaultsAndIndependentNamespaces(t *testing.T) {
 	c := testConfig(t)
-	if c.ListenAddress != ":9012" || c.WebhookPath != "/webhook" || c.ShutdownTimeout != 10*time.Second || c.MaxBodyBytes != 1<<20 {
+	if c.ListenAddress != ":9012" || c.WebhookPath != "/webhook" || c.ShutdownTimeout != 10*time.Second || c.MaxBodyBytes != 1<<20 || c.EvaluationHorizonDays != 370 {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 	if c.SLADefinitions[0].SLAs["business"].Timezone != "Europe/Stockholm" || c.SLADefinitions[1].SLAs["business"].Timezone != "UTC" {
@@ -82,29 +82,32 @@ func TestStrictYAML(t *testing.T) {
 
 func TestConfigValidation(t *testing.T) {
 	for name, mutate := range map[string]func(*Config){
-		"bad address":      func(c *Config) { c.ListenAddress = "localhost" },
-		"bad port":         func(c *Config) { c.ListenAddress = ":65536" },
-		"service port":     func(c *Config) { c.ListenAddress = ":http" },
-		"empty path":       func(c *Config) { c.WebhookPath = "" },
-		"relative path":    func(c *Config) { c.WebhookPath = "webhook" },
-		"query":            func(c *Config) { c.WebhookPath = "/webhook?x=y" },
-		"fragment":         func(c *Config) { c.WebhookPath = "/webhook#x" },
-		"pattern":          func(c *Config) { c.WebhookPath = "/{any}" },
-		"redirect path":    func(c *Config) { c.WebhookPath = "/a/../webhook" },
-		"subtree":          func(c *Config) { c.WebhookPath = "/webhook/" },
-		"metrics conflict": func(c *Config) { c.WebhookPath = "/metrics" },
-		"health conflict":  func(c *Config) { c.WebhookPath = "/healthz" },
-		"ready conflict":   func(c *Config) { c.WebhookPath = "/readyz" },
-		"body limit":       func(c *Config) { c.MaxBodyBytes = 0 },
-		"large body limit": func(c *Config) { c.MaxBodyBytes = 65 << 20 },
-		"shutdown":         func(c *Config) { c.ShutdownTimeout = 0 },
-		"long shutdown":    func(c *Config) { c.ShutdownTimeout = 2 * time.Minute },
-		"no definitions":   func(c *Config) { c.SLADefinitions = nil },
-		"empty label":      func(c *Config) { c.SLADefinitions[0].SLALabel = "" },
-		"invalid label":    func(c *Config) { c.SLADefinitions[0].SLALabel = "sla id" },
-		"duplicate label":  func(c *Config) { c.SLADefinitions[1].SLALabel = "sla_id" },
-		"empty slas":       func(c *Config) { c.SLADefinitions[0].SLAs = nil },
-		"empty name":       func(c *Config) { c.SLADefinitions[0].SLAs[" "] = c.SLADefinitions[0].SLAs["business"] },
+		"bad address":       func(c *Config) { c.ListenAddress = "localhost" },
+		"bad port":          func(c *Config) { c.ListenAddress = ":65536" },
+		"service port":      func(c *Config) { c.ListenAddress = ":http" },
+		"empty path":        func(c *Config) { c.WebhookPath = "" },
+		"relative path":     func(c *Config) { c.WebhookPath = "webhook" },
+		"query":             func(c *Config) { c.WebhookPath = "/webhook?x=y" },
+		"fragment":          func(c *Config) { c.WebhookPath = "/webhook#x" },
+		"pattern":           func(c *Config) { c.WebhookPath = "/{any}" },
+		"redirect path":     func(c *Config) { c.WebhookPath = "/a/../webhook" },
+		"subtree":           func(c *Config) { c.WebhookPath = "/webhook/" },
+		"metrics conflict":  func(c *Config) { c.WebhookPath = "/metrics" },
+		"health conflict":   func(c *Config) { c.WebhookPath = "/healthz" },
+		"ready conflict":    func(c *Config) { c.WebhookPath = "/readyz" },
+		"body limit":        func(c *Config) { c.MaxBodyBytes = 0 },
+		"large body limit":  func(c *Config) { c.MaxBodyBytes = 65 << 20 },
+		"shutdown":          func(c *Config) { c.ShutdownTimeout = 0 },
+		"long shutdown":     func(c *Config) { c.ShutdownTimeout = 2 * time.Minute },
+		"no definitions":    func(c *Config) { c.SLADefinitions = nil },
+		"zero horizon":      func(c *Config) { c.EvaluationHorizonDays = 0 },
+		"negative horizon":  func(c *Config) { c.EvaluationHorizonDays = -1 },
+		"excessive horizon": func(c *Config) { c.EvaluationHorizonDays = 3661 },
+		"empty label":       func(c *Config) { c.SLADefinitions[0].SLALabel = "" },
+		"invalid label":     func(c *Config) { c.SLADefinitions[0].SLALabel = "sla id" },
+		"duplicate label":   func(c *Config) { c.SLADefinitions[1].SLALabel = "sla_id" },
+		"empty slas":        func(c *Config) { c.SLADefinitions[0].SLAs = nil },
+		"empty name":        func(c *Config) { c.SLADefinitions[0].SLAs[" "] = c.SLADefinitions[0].SLAs["business"] },
 	} {
 		t.Run(name, func(t *testing.T) {
 			c := testConfig(t)
@@ -151,14 +154,14 @@ func TestPolicySyntax(t *testing.T) {
 	}
 }
 
-func TestHolidaySyntaxWithoutCoverageEvaluation(t *testing.T) {
+func TestHolidayBlockSyntaxBeforeProviderValidation(t *testing.T) {
 	for _, tc := range []struct {
 		h     *Holidays
 		valid bool
 	}{
 		{nil, true}, {&Holidays{}, false},
 		{&Holidays{Country: "SE", Subdivision: "UNVERIFIED"}, true},
-		{&Holidays{Country: "ZZ"}, true}, // Coverage deliberately deferred.
+		{&Holidays{Country: "ZZ"}, true}, // Coverage is validated by the engine at startup.
 		{&Holidays{Country: "se"}, false},
 		{&Holidays{Country: "SWE"}, false},
 		{&Holidays{Subdivision: "BY"}, false},

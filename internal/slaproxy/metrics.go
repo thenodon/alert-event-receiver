@@ -3,12 +3,15 @@ package slaproxy
 import "github.com/prometheus/client_golang/prometheus"
 
 type metrics struct {
-	registry *prometheus.Registry
-	requests *prometheus.CounterVec
-	latency  *prometheus.HistogramVec
-	alerts   *prometheus.CounterVec
-	selected *prometheus.CounterVec
-	skipped  *prometheus.CounterVec
+	registry     *prometheus.Registry
+	requests     *prometheus.CounterVec
+	latency      *prometheus.HistogramVec
+	alerts       *prometheus.CounterVec
+	selected     *prometheus.CounterVec
+	skipped      *prometheus.CounterVec
+	decisions    *prometheus.CounterVec
+	policyErrors *prometheus.CounterVec
+	holidays     *prometheus.CounterVec
 }
 
 func newMetrics(cfg Config) *metrics {
@@ -29,8 +32,18 @@ func newMetrics(cfg Config) *metrics {
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sla_proxy_alerts_skipped_total", Help: "Valid alerts skipped for missing SLA selection labels or unknown SLA identifiers.",
 		}, []string{"reason"}),
+		decisions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sla_proxy_policy_decisions_total", Help: "Successful per-alert startsAt calendar classifications by configured policy pair, decision and bounded reason; not delivery decisions.",
+		}, []string{"sla_label", "sla_value", "decision", "reason"}),
+		policyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sla_proxy_policy_errors_total", Help: "Failed evaluator calls by bounded reason; one call per selected policy pair and exact startsAt instant per webhook.",
+		}, []string{"reason"}),
+		holidays: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sla_proxy_holiday_evaluations_total", Help: "Country calendar checks, including future dates searched, by configured country and result; not alert counts.",
+		}, []string{"country", "result"}),
 	}
 	m.registry.MustRegister(m.requests, m.latency, m.alerts, m.selected, m.skipped,
+		m.decisions, m.policyErrors, m.holidays,
 		prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
 	for _, status := range []string{"2xx", "4xx", "5xx"} {
 		m.requests.WithLabelValues(status)
@@ -45,6 +58,9 @@ func newMetrics(cfg Config) *metrics {
 	}
 	for _, reason := range []string{"missing_sla_label", "unknown_sla"} {
 		m.skipped.WithLabelValues(reason)
+	}
+	for _, reason := range []string{"calendar_error", "unknown_policy", "invalid_evaluation_time", "cancelled", "evaluation_error"} {
+		m.policyErrors.WithLabelValues(reason)
 	}
 	return m
 }

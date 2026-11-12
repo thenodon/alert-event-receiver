@@ -14,12 +14,45 @@ import (
 )
 
 type Observation struct {
-	Mode      string `json:"mode"`
-	Persisted bool   `json:"persisted"`
-	Forwarded bool   `json:"forwarded"`
-	Received  int    `json:"received"`
-	Selected  int    `json:"selected"`
-	Skipped   int    `json:"skipped"`
+	Mode             string              `json:"mode"`
+	Persisted        bool                `json:"persisted"`
+	Forwarded        bool                `json:"forwarded"`
+	Received         int                 `json:"received"`
+	Selected         int                 `json:"selected"`
+	Skipped          int                 `json:"skipped"`
+	Evaluated        int                 `json:"evaluated"`
+	Eligible         int                 `json:"eligible"`
+	Ineligible       int                 `json:"ineligible"`
+	EvaluationErrors int                 `json:"evaluation_errors"`
+	EvaluatedAt      time.Time           `json:"evaluated_at"`
+	Policies         []PolicyObservation `json:"policy_observations"`
+}
+
+// PolicyObservation identifies one occurrence and selected policy. Repeated
+// notifications of that occurrence are counted together within this batch.
+// NextEligibleAt is relative to StartsAt, not a scheduled evaluation or delivery.
+type PolicyObservation struct {
+	SLALabel       string     `json:"sla_label"`
+	SLAValue       string     `json:"sla_value"`
+	Fingerprint    string     `json:"fingerprint"`
+	StartsAt       time.Time  `json:"starts_at"`
+	AlertCount     int        `json:"alert_count"`
+	Eligible       bool       `json:"eligible"`
+	Reason         string     `json:"reason"`
+	NextEligibleAt *time.Time `json:"next_eligible_at,omitempty"`
+	PolicyVersion  string     `json:"policy_version,omitempty"`
+	Error          string     `json:"error,omitempty"`
+}
+
+func evaluationErrorReason(err error) string {
+	var evaluationErr *EvaluationError
+	if errors.As(err, &evaluationErr) {
+		switch evaluationErr.Reason {
+		case "calendar_error", "unknown_policy", "invalid_evaluation_time", "cancelled":
+			return evaluationErr.Reason
+		}
+	}
+	return "evaluation_error"
 }
 
 func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +95,20 @@ func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid webhook payload", status)
 		return
 	}
-	result := Observation{Mode: "observe_only", Received: len(payload.Alerts)}
+	result := Observation{Mode: "observe_only", Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Policies: []PolicyObservation{}}
+	// Calendar evaluation depends only on policy and exact occurrence time.
+	// Fingerprints remain separate in the response even if results are reused.
+	// The clock above is processing metadata only, never a classification input.
+	type evaluationKey struct {
+		Policy   PolicyRef
+		StartsAt time.Time
+	}
+	type observationKey struct {
+		evaluationKey
+		Fingerprint string
+	}
+	decisions := make(map[evaluationKey]PolicyObservation)
+	policyIndexes := make(map[observationKey]int)
 	for _, alert := range payload.Alerts {
 		s.metrics.alerts.WithLabelValues(alert.Status).Inc()
 		ref, reason := s.cfg.Select(alert)
@@ -72,12 +118,63 @@ func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		// The concrete no-op hook cannot fail or mutate the original alert.
-		// No custom enrichment adapter is installed in Phase 1.
-		_, _ = s.enricher.Enrich(r.Context(), alert)
+		// No custom enrichment adapter is installed in Phase 2.
+		metadata, _ := s.enricher.Enrich(r.Context(), alert)
 		result.Selected++
 		s.metrics.selected.WithLabelValues(ref.SLALabel, ref.SLAValue, alert.Status).Inc()
+		startsAt := alert.StartsAt.UTC()
+		key := evaluationKey{Policy: ref, StartsAt: startsAt}
+		cached, exists := decisions[key]
+		if !exists {
+			cached = PolicyObservation{SLALabel: ref.SLALabel, SLAValue: ref.SLAValue, StartsAt: startsAt}
+			decision, err := s.evaluator.Evaluate(r.Context(), PolicyInput{Alert: alert, Enrichment: metadata}, ref, "", startsAt)
+			if err != nil {
+				cached.Error = evaluationErrorReason(err)
+				cached.Reason = "evaluation_error"
+				s.metrics.policyErrors.WithLabelValues(cached.Error).Inc()
+				s.logger.ErrorContext(r.Context(), "SLA calendar evaluation failed", "component", "sla_policy", "operation", "evaluate",
+					"sla_label", ref.SLALabel, "sla_value", ref.SLAValue, "starts_at", startsAt.Format(time.RFC3339Nano), "reason", cached.Error)
+			} else {
+				cached.Eligible, cached.Reason, cached.PolicyVersion = decision.Eligible, decision.Reason, decision.PolicyVersion
+				if !decision.NextEvaluationAt.IsZero() {
+					next := decision.NextEvaluationAt.UTC()
+					cached.NextEligibleAt = &next
+				}
+			}
+			decisions[key] = cached
+		}
+		occurrence := observationKey{evaluationKey: key, Fingerprint: alert.Fingerprint}
+		index, exists := policyIndexes[occurrence]
+		if !exists {
+			cached.Fingerprint = alert.Fingerprint
+			index = len(result.Policies)
+			policyIndexes[occurrence] = index
+			result.Policies = append(result.Policies, cached)
+		}
+		observation := &result.Policies[index]
+		observation.AlertCount++
+		if observation.Error != "" {
+			result.EvaluationErrors++
+			continue
+		}
+		result.Evaluated++
+		decision := "ineligible"
+		if observation.Eligible {
+			result.Eligible++
+			decision = "eligible"
+		} else {
+			result.Ineligible++
+		}
+		s.metrics.decisions.WithLabelValues(ref.SLALabel, ref.SLAValue, decision, observation.Reason).Inc()
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if result.EvaluationErrors != 0 {
+		status = http.StatusInternalServerError
+		w.WriteHeader(status)
+	}
+	s.logger.InfoContext(r.Context(), "webhook observation",
+		"component", "sla_webhook", "operation", "observe", "http_status", status,
+		"observation", result)
 	if err := json.NewEncoder(w).Encode(result); err != nil {
 		s.logger.WarnContext(r.Context(), "observation response write failed", "component", "sla_webhook", "operation", "respond")
 	}

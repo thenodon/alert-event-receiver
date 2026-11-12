@@ -1,8 +1,9 @@
-# Phase 1: observation only. These schedules are validated but NOT enforced.
+# Phase 2: calendars are evaluated, but alerts are NOT persisted or forwarded.
 listen_address: ":9012"
 webhook_path: /webhook
 max_body_bytes: 1048576
 shutdown_timeout: 10s
+evaluation_horizon_days: 370
 
 sla_definitions:
   - sla_label: sla_id
