@@ -37,6 +37,13 @@ func (m *DurableManager) accept(ctx context.Context, a models.Alert, payload mod
 	id := occurrenceKeyID(a)
 	ref, selection := m.cfg.Select(a)
 	var refs []PolicyRef
+	// Count selected attempts here, including failures with a known policy. The
+	// HTTP handler can then check errors before consuming the acceptance result.
+	defer func() {
+		for _, ref := range refs {
+			m.store.metrics.selected.WithLabelValues(ref.SLALabel, ref.SLAValue, a.Status).Inc()
+		}
+	}()
 	if selection == "selected" {
 		refs = []PolicyRef{ref}
 	}
@@ -110,13 +117,13 @@ func transitionSnapshot(row *DurableOccurrence) *DurableOccurrence {
 	if row == nil {
 		return nil
 	}
-	copy := *row
-	copy.Bindings = make(map[string]*DurableBinding, len(row.Bindings))
+	snapshot := *row
+	snapshot.Bindings = make(map[string]*DurableBinding, len(row.Bindings))
 	for id, b := range row.Bindings {
 		binding := *b
-		copy.Bindings[id] = &binding
+		snapshot.Bindings[id] = &binding
 	}
-	return &copy
+	return &snapshot
 }
 
 // advance trusts Alertmanager's webhook lifecycle. Absence of a received resolve

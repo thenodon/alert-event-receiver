@@ -331,5 +331,5 @@ func (s *DurableStore) due(ctx context.Context, index string, limit int) (ids []
 	if err != nil {
 		return nil, err
 	}
-	return s.client.ZRangeByScore(ctx, s.key(index), &redis.ZRangeBy{Min: "-inf", Max: fmt.Sprint(now.UnixMilli()), Count: int64(limit)}).Result()
+	return s.client.ZRangeArgs(ctx, redis.ZRangeArgs{Key: s.key(index), Start: "-inf", Stop: now.UnixMilli(), ByScore: true, Count: int64(limit)}).Result()
 }

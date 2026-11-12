@@ -487,6 +487,12 @@ func TestValkeyPartialBatchCommitAndValidation(t *testing.T) {
 	if w.Code != 503 || json.Unmarshal(w.Body.Bytes(), &result) != nil || result.Persisted || result.PersistedCount != 1 || result.FailedCount != 1 {
 		t.Fatal(w.Code, w.Body)
 	}
+	if result.Selected != 2 || result.Skipped != 0 {
+		t.Fatal("failed acceptance changed batch accounting", result)
+	}
+	if got := counter(t, s, "sla_proxy_alerts_selected_total", map[string]string{"sla_label": "sla_id", "sla_value": "business", "status": "firing"}); got != 2 {
+		t.Fatal("selected metric must include failed acceptance", got)
+	}
 	if err := s.durable.store.client.Del(context.Background(), key).Err(); err != nil {
 		t.Fatal(err)
 	}

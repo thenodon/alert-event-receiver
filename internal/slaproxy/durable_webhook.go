@@ -54,20 +54,18 @@ func (s *Service) durableWebhook(w http.ResponseWriter, r *http.Request, payload
 		ctx, cancel := context.WithTimeout(batchCtx, s.cfg.Durable.Scheduler.OperationTimeout)
 		accepted, err := s.durable.accept(ctx, a, payload)
 		cancel()
+		if err != nil {
+			result.Selected++
+			result.FailedCount++
+			s.logger.ErrorContext(r.Context(), "SLA occurrence was not acknowledged", "component", "sla_lifecycle", "operation", "accept", "fingerprint", a.Fingerprint, "starts_at", a.StartsAt, "error", err.Error())
+			continue
+		}
 		if accepted.Skipped != "" {
 			result.Skipped++
 			s.metrics.skipped.WithLabelValues(accepted.Skipped).Inc()
 			continue
 		}
 		result.Selected++
-		for _, ref := range accepted.Policies {
-			s.metrics.selected.WithLabelValues(ref.SLALabel, ref.SLAValue, a.Status).Inc()
-		}
-		if err != nil {
-			result.FailedCount++
-			s.logger.ErrorContext(r.Context(), "SLA occurrence was not acknowledged", "component", "sla_lifecycle", "operation", "accept", "fingerprint", a.Fingerprint, "starts_at", a.StartsAt, "error", err.Error())
-			continue
-		}
 		row := accepted.Occurrence
 		result.PersistedCount++
 		summary := DurableSummary{OccurrenceID: row.ID, Fingerprint: row.Fingerprint, StartsAt: row.StartsAt, Lifecycle: row.Lifecycle, EndsAt: row.EndsAt, Version: row.Version, Bindings: []BindingSummary{}}
