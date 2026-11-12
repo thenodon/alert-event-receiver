@@ -1,6 +1,9 @@
 package slaproxy
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+)
 
 type metrics struct {
 	registry     *prometheus.Registry
@@ -44,7 +47,7 @@ func newMetrics(cfg Config) *metrics {
 	}
 	m.registry.MustRegister(m.requests, m.latency, m.alerts, m.selected, m.skipped,
 		m.decisions, m.policyErrors, m.holidays,
-		prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, status := range []string{"2xx", "4xx", "5xx"} {
 		m.requests.WithLabelValues(status)
 	}
