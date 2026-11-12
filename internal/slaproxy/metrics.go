@@ -12,7 +12,8 @@ type metrics struct {
 	alerts       *prometheus.CounterVec
 	selected     *prometheus.CounterVec
 	skipped      *prometheus.CounterVec
-	decisions    *prometheus.CounterVec
+	calendar     *prometheus.CounterVec
+	eligibility  *prometheus.CounterVec
 	policyErrors *prometheus.CounterVec
 	holidays     *prometheus.CounterVec
 }
@@ -35,9 +36,12 @@ func newMetrics(cfg Config) *metrics {
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sla_proxy_alerts_skipped_total", Help: "Valid alerts skipped for missing SLA selection labels or unknown SLA identifiers.",
 		}, []string{"reason"}),
-		decisions: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sla_proxy_policy_decisions_total", Help: "Successful per-alert startsAt calendar classifications by configured policy pair, decision and bounded reason; not delivery decisions.",
-		}, []string{"sla_label", "sla_value", "decision", "reason"}),
+		calendar: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sla_proxy_calendar_classifications_total", Help: "Successful per-notification calendar classifications at startsAt, not lifecycle eligibility or delivery.",
+		}, []string{"sla_label", "sla_value", "classification", "reason"}),
+		eligibility: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "sla_proxy_alert_eligibility_observations_total", Help: "Per-notification lifecycle evidence status, including pending, unknown and errors; not current activity verification or delivery.",
+		}, []string{"sla_label", "sla_value", "alert_status", "eligibility_status", "reason"}),
 		policyErrors: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sla_proxy_policy_errors_total", Help: "Failed evaluator calls by bounded reason; one call per selected policy pair and exact startsAt instant per webhook.",
 		}, []string{"reason"}),
@@ -46,7 +50,7 @@ func newMetrics(cfg Config) *metrics {
 		}, []string{"country", "result"}),
 	}
 	m.registry.MustRegister(m.requests, m.latency, m.alerts, m.selected, m.skipped,
-		m.decisions, m.policyErrors, m.holidays,
+		m.calendar, m.eligibility, m.policyErrors, m.holidays,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, status := range []string{"2xx", "4xx", "5xx"} {
 		m.requests.WithLabelValues(status)

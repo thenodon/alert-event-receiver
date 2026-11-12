@@ -248,8 +248,8 @@ Adjust field names and stream settings to match your OTLP ingestion configuratio
 ## Alert SLA Proxy (Phase 2)
 
 The separate `alert-sla-proxy` service validates Alertmanager webhooks, selects
-independent label-based SLA policies, and classifies each occurrence using its
-`startsAt`, with the next eligible instant relative to that start time. It
+independent label-based SLA policies, and distinguishes calendar eligibility at
+`startsAt` from overlap of the alert's active interval with SLA windows. It
 evaluates IANA weekly schedules and optional public
 holidays for Sweden, Germany nationally, or Bavaria, plus explicit dates.
 It remains stateless: it does not connect to Valkey, persist, schedule or forward
@@ -267,7 +267,10 @@ The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz` and
 is strictly validated, including calendar coverage and cross-weekday overlaps;
 independent SLA maps preserve definition order. Missing selection labels and
 unknown SLA identifiers are counted per-alert skips. Responses include per-policy
-eligibility observations and next times; these do not create scheduled work.
+schema-version-2 calendar and lifecycle observations (eligible, ineligible,
+pending, unknown or error). Resolved alerts use [startsAt, endsAt); delayed firing
+is not proof of current activity. next_eligible_at remains a calendar opportunity,
+not scheduled work. Calendar and lifecycle metrics use separate explicit names.
 
 See the [SLA proxy guide](docs/alert-sla-proxy.md),
 [configuration example](docs/examples/alert-sla-proxy.yaml), and

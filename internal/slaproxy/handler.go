@@ -14,6 +14,7 @@ import (
 )
 
 type Observation struct {
+	SchemaVersion    int                 `json:"schema_version"`
 	Mode             string              `json:"mode"`
 	Persisted        bool                `json:"persisted"`
 	Forwarded        bool                `json:"forwarded"`
@@ -23,25 +24,40 @@ type Observation struct {
 	Evaluated        int                 `json:"evaluated"`
 	Eligible         int                 `json:"eligible"`
 	Ineligible       int                 `json:"ineligible"`
+	Pending          int                 `json:"pending"`
+	Unknown          int                 `json:"unknown"`
 	EvaluationErrors int                 `json:"evaluation_errors"`
 	EvaluatedAt      time.Time           `json:"evaluated_at"`
 	Policies         []PolicyObservation `json:"policy_observations"`
 }
 
-// PolicyObservation identifies one occurrence and selected policy. Repeated
-// notifications of that occurrence are counted together within this batch.
-// NextEligibleAt is relative to StartsAt, not a scheduled evaluation or delivery.
+// PolicyObservation separates the calendar at startsAt from the lifecycle
+// evidence in this individual notification. Firing and resolved inputs, and
+// resolutions with different endsAt, must not be merged into one conclusion.
 type PolicyObservation struct {
-	SLALabel       string     `json:"sla_label"`
-	SLAValue       string     `json:"sla_value"`
-	Fingerprint    string     `json:"fingerprint"`
-	StartsAt       time.Time  `json:"starts_at"`
-	AlertCount     int        `json:"alert_count"`
-	Eligible       bool       `json:"eligible"`
-	Reason         string     `json:"reason"`
-	NextEligibleAt *time.Time `json:"next_eligible_at,omitempty"`
-	PolicyVersion  string     `json:"policy_version,omitempty"`
-	Error          string     `json:"error,omitempty"`
+	SLALabel            string            `json:"sla_label"`
+	SLAValue            string            `json:"sla_value"`
+	Fingerprint         string            `json:"fingerprint"`
+	StartsAt            time.Time         `json:"starts_at"`
+	AlertStatus         string            `json:"alert_status"`
+	EndsAt              *time.Time        `json:"ends_at,omitempty"`
+	AlertCount          int               `json:"alert_count"`
+	EligibleAtStart     *bool             `json:"eligible_at_start,omitempty"`
+	CalendarReason      string            `json:"calendar_reason,omitempty"`
+	EligibilityStatus   EligibilityStatus `json:"eligibility_status"`
+	EligibilityReason   string            `json:"eligibility_reason"`
+	NextEligibleAt      *time.Time        `json:"next_eligible_at,omitempty"`
+	CalendarSearchUntil *time.Time        `json:"calendar_search_until,omitempty"`
+	PolicyVersion       string            `json:"policy_version,omitempty"`
+	Error               string            `json:"error,omitempty"`
+}
+
+func utcPointer(at time.Time) *time.Time {
+	if at.IsZero() {
+		return nil
+	}
+	utc := at.UTC()
+	return &utc
 }
 
 func evaluationErrorReason(err error) string {
@@ -95,19 +111,23 @@ func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid webhook payload", status)
 		return
 	}
-	result := Observation{Mode: "observe_only", Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Policies: []PolicyObservation{}}
-	// Calendar evaluation depends only on policy and exact occurrence time.
-	// Fingerprints remain separate in the response even if results are reused.
-	// The clock above is processing metadata only, never a classification input.
+	result := Observation{SchemaVersion: 2, Mode: "observe_only", Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Policies: []PolicyObservation{}}
+	// Cache calendar work only. Lifecycle conclusions also depend on status,
+	// resolution time and the observation cutoff, never just policy/startsAt.
 	type evaluationKey struct {
 		Policy   PolicyRef
 		StartsAt time.Time
 	}
 	type observationKey struct {
 		evaluationKey
-		Fingerprint string
+		Fingerprint, Status string
+		EndsAt              time.Time
 	}
-	decisions := make(map[evaluationKey]PolicyObservation)
+	type calendarResult struct {
+		decision Decision
+		failure  string
+	}
+	decisions := make(map[evaluationKey]calendarResult)
 	policyIndexes := make(map[observationKey]int)
 	for _, alert := range payload.Alerts {
 		s.metrics.alerts.WithLabelValues(alert.Status).Inc()
@@ -117,55 +137,74 @@ func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
 			s.metrics.skipped.WithLabelValues(reason).Inc()
 			continue
 		}
-		// The concrete no-op hook cannot fail or mutate the original alert.
-		// No custom enrichment adapter is installed in Phase 2.
-		metadata, _ := s.enricher.Enrich(r.Context(), alert)
+		metadata, _ := s.enricher.Enrich(r.Context(), alert) // Concrete no-op.
 		result.Selected++
 		s.metrics.selected.WithLabelValues(ref.SLALabel, ref.SLAValue, alert.Status).Inc()
 		startsAt := alert.StartsAt.UTC()
 		key := evaluationKey{Policy: ref, StartsAt: startsAt}
 		cached, exists := decisions[key]
 		if !exists {
-			cached = PolicyObservation{SLALabel: ref.SLALabel, SLAValue: ref.SLAValue, StartsAt: startsAt}
 			decision, err := s.evaluator.Evaluate(r.Context(), PolicyInput{Alert: alert, Enrichment: metadata}, ref, "", startsAt)
 			if err != nil {
-				cached.Error = evaluationErrorReason(err)
-				cached.Reason = "evaluation_error"
-				s.metrics.policyErrors.WithLabelValues(cached.Error).Inc()
+				cached.failure = evaluationErrorReason(err)
+				s.metrics.policyErrors.WithLabelValues(cached.failure).Inc()
 				s.logger.ErrorContext(r.Context(), "SLA calendar evaluation failed", "component", "sla_policy", "operation", "evaluate",
-					"sla_label", ref.SLALabel, "sla_value", ref.SLAValue, "starts_at", startsAt.Format(time.RFC3339Nano), "reason", cached.Error)
+					"sla_label", ref.SLALabel, "sla_value", ref.SLAValue, "starts_at", startsAt.Format(time.RFC3339Nano), "reason", cached.failure)
 			} else {
-				cached.Eligible, cached.Reason, cached.PolicyVersion = decision.Eligible, decision.Reason, decision.PolicyVersion
-				if !decision.NextEvaluationAt.IsZero() {
-					next := decision.NextEvaluationAt.UTC()
-					cached.NextEligibleAt = &next
-				}
+				cached.decision = decision
 			}
 			decisions[key] = cached
 		}
-		occurrence := observationKey{evaluationKey: key, Fingerprint: alert.Fingerprint}
+		occurrence := observationKey{evaluationKey: key, Fingerprint: alert.Fingerprint, Status: alert.Status}
+		// Firing endsAt can be an Alertmanager expiry estimate, not evidence of
+		// resolution. Only resolved endsAt bounds a known active interval.
+		if alert.Status == "resolved" {
+			occurrence.EndsAt = alert.EndsAt.UTC()
+		}
 		index, exists := policyIndexes[occurrence]
 		if !exists {
-			cached.Fingerprint = alert.Fingerprint
+			observation := PolicyObservation{SLALabel: ref.SLALabel, SLAValue: ref.SLAValue, StartsAt: startsAt,
+				Fingerprint: alert.Fingerprint, AlertStatus: alert.Status, Error: cached.failure}
+			if alert.Status == "resolved" {
+				observation.EndsAt = utcPointer(alert.EndsAt)
+			}
+			if cached.failure != "" {
+				observation.EligibilityStatus, observation.EligibilityReason = EligibilityError, "calendar_evaluation_error"
+			} else {
+				d := cached.decision
+				eligibleAtStart := d.Eligible
+				observation.EligibleAtStart = &eligibleAtStart
+				observation.CalendarReason, observation.PolicyVersion = d.Reason, d.PolicyVersion
+				observation.NextEligibleAt, observation.CalendarSearchUntil = utcPointer(d.NextEvaluationAt), utcPointer(d.SearchUntil)
+				observation.EligibilityStatus, observation.EligibilityReason = alertEligibility(alert, d, result.EvaluatedAt)
+			}
 			index = len(result.Policies)
 			policyIndexes[occurrence] = index
-			result.Policies = append(result.Policies, cached)
+			result.Policies = append(result.Policies, observation)
 		}
 		observation := &result.Policies[index]
 		observation.AlertCount++
-		if observation.Error != "" {
+		s.metrics.eligibility.WithLabelValues(ref.SLALabel, ref.SLAValue, alert.Status, string(observation.EligibilityStatus), observation.EligibilityReason).Inc()
+		if cached.failure != "" {
 			result.EvaluationErrors++
 			continue
 		}
 		result.Evaluated++
-		decision := "ineligible"
-		if observation.Eligible {
-			result.Eligible++
-			decision = "eligible"
-		} else {
-			result.Ineligible++
+		classification := "outside_sla"
+		if cached.decision.Eligible {
+			classification = "inside_sla"
 		}
-		s.metrics.decisions.WithLabelValues(ref.SLALabel, ref.SLAValue, decision, observation.Reason).Inc()
+		s.metrics.calendar.WithLabelValues(ref.SLALabel, ref.SLAValue, classification, observation.CalendarReason).Inc()
+		switch observation.EligibilityStatus {
+		case EligibilityEligible:
+			result.Eligible++
+		case EligibilityIneligible:
+			result.Ineligible++
+		case EligibilityPending:
+			result.Pending++
+		case EligibilityUnknown:
+			result.Unknown++
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if result.EvaluationErrors != 0 {

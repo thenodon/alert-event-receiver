@@ -20,11 +20,16 @@ type OccurrenceID struct {
 	StartsAt    time.Time
 }
 
+// Decision is calendar eligibility at the supplied instant, not alert lifecycle
+// eligibility. NextEvaluationAt is the first eligible instant at or after it.
 type Decision struct {
 	Eligible         bool
 	Reason           string
 	NextEvaluationAt time.Time
 	PolicyVersion    string
+	// SearchUntil is exclusive, and set on horizon exhaustion when coverage is
+	// known: no eligible instant exists in [evaluation time, SearchUntil).
+	SearchUntil time.Time
 }
 
 // PolicyEvaluator observes eligibility, without persisting or delivering alerts.

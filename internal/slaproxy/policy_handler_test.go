@@ -54,16 +54,17 @@ func TestWebhookClassifiesOccurrenceTimeDespiteProcessingClock(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	if result.Mode != "observe_only" || result.Persisted || result.Forwarded || result.Received != 4 || result.Selected != 3 || result.Skipped != 1 || result.Evaluated != 3 || result.Eligible != 1 || result.Ineligible != 2 || result.EvaluationErrors != 0 || !result.EvaluatedAt.Equal(s.now()) {
+	if result.Mode != "observe_only" || result.Persisted || result.Forwarded || result.Received != 4 || result.Selected != 3 || result.Skipped != 1 || result.Evaluated != 3 || result.Eligible != 2 || result.Ineligible != 0 || result.Unknown != 1 || result.EvaluationErrors != 0 || !result.EvaluatedAt.Equal(s.now()) {
 		t.Fatalf("unexpected response %+v", result)
 	}
-	if len(result.Policies) != 2 || result.Policies[0].AlertCount != 2 || result.Policies[0].Eligible || result.Policies[0].NextEligibleAt == nil || !result.Policies[0].NextEligibleAt.Equal(instant(t, "2026-11-09T12:00:00Z")) || !result.Policies[1].Eligible {
-		t.Fatalf("wrong policy observations: %+v", result.Policies)
+	if len(result.Policies) != 3 || result.Policies[0].EligibilityStatus != EligibilityUnknown || result.Policies[1].EligibilityStatus != EligibilityEligible || result.Policies[2].EligibilityStatus != EligibilityEligible {
+		t.Fatalf("different lifecycle evidence was merged: %+v", result.Policies)
 	}
-	if got := counter(t, s, "sla_proxy_policy_decisions_total", map[string]string{"sla_label": "sla_id", "sla_value": "business", "decision": "ineligible", "reason": ReasonOutsideWindow}); got != 2 {
+
+	if got := counter(t, s, "sla_proxy_calendar_classifications_total", map[string]string{"sla_label": "sla_id", "sla_value": "business", "classification": "outside_sla", "reason": ReasonOutsideWindow}); got != 2 {
 		t.Fatal(got)
 	}
-	if got := counter(t, s, "sla_proxy_policy_decisions_total", map[string]string{"sla_label": "sla_name", "sla_value": "business", "decision": "eligible", "reason": ReasonEligible}); got != 1 {
+	if got := counter(t, s, "sla_proxy_calendar_classifications_total", map[string]string{"sla_label": "sla_name", "sla_value": "business", "classification": "inside_sla", "reason": ReasonEligible}); got != 1 {
 		t.Fatal(got)
 	}
 	// One provider check for this unique pair, despite two alert statuses.
@@ -93,7 +94,7 @@ func TestEvaluationFailureReturns500WithoutClaimingEligibility(t *testing.T) {
 		t.Fatal(result)
 	}
 	failed := result.Policies[0]
-	if failed.Error != "calendar_error" || failed.Eligible || failed.NextEligibleAt != nil || failed.PolicyVersion != "" {
+	if failed.Error != "calendar_error" || failed.EligibleAtStart != nil || failed.EligibilityStatus != EligibilityError || failed.NextEligibleAt != nil || failed.PolicyVersion != "" {
 		t.Fatal("authoritative result on failed evaluation", failed)
 	}
 	if got := counter(t, s, "sla_proxy_policy_errors_total", map[string]string{"reason": "calendar_error"}); got != 2 {
@@ -181,14 +182,14 @@ func TestSamePolicyDifferentStartsAtClassifiesIndependently(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		t.Fatalf("%d %s", w.Code, w.Body)
 	}
-	if result.Selected != 3 || result.Eligible != 1 || result.Ineligible != 2 || !result.EvaluatedAt.Equal(processingTime) || len(result.Policies) != 2 {
+	if result.Selected != 3 || result.Eligible != 1 || result.Ineligible != 0 || result.Unknown != 2 || !result.EvaluatedAt.Equal(processingTime) || len(result.Policies) != 2 {
 		t.Fatal(result)
 	}
 	first, second := result.Policies[0], result.Policies[1]
-	if first.Fingerprint != outside.Fingerprint || !first.StartsAt.Equal(outside.StartsAt) || first.AlertCount != 2 || first.Eligible || first.NextEligibleAt == nil || !first.NextEligibleAt.Equal(instant(t, "2026-11-11T07:00:00Z")) {
+	if first.Fingerprint != outside.Fingerprint || !first.StartsAt.Equal(outside.StartsAt) || first.AlertCount != 2 || *first.EligibleAtStart || first.EligibilityStatus != EligibilityUnknown || first.NextEligibleAt == nil || !first.NextEligibleAt.Equal(instant(t, "2026-11-11T07:00:00Z")) {
 		t.Fatal(first)
 	}
-	if second.Fingerprint != inside.Fingerprint || !second.StartsAt.Equal(inside.StartsAt) || second.AlertCount != 1 || !second.Eligible || second.NextEligibleAt == nil || !second.NextEligibleAt.Equal(inside.StartsAt) {
+	if second.Fingerprint != inside.Fingerprint || !second.StartsAt.Equal(inside.StartsAt) || second.AlertCount != 1 || !*second.EligibleAtStart || second.EligibilityStatus != EligibilityEligible || second.NextEligibleAt == nil || !second.NextEligibleAt.Equal(inside.StartsAt) {
 		t.Fatal(second)
 	}
 	var raw map[string]json.RawMessage
@@ -224,7 +225,7 @@ func TestDeliveryLatencyAndHolidayDoNotChangeOccurrenceClassification(t *testing
 		for _, status := range []string{"firing", "resolved"} {
 			w := post(s, testPayload(t, alertAt(t, status, "sla_id", tc.starts)))
 			var result Observation
-			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Policies) != 1 || result.Policies[0].Eligible != tc.eligible || result.Policies[0].Reason != tc.reason {
+			if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil || len(result.Policies) != 1 || *result.Policies[0].EligibleAtStart != tc.eligible || result.Policies[0].CalendarReason != tc.reason {
 				t.Fatalf("%s %s: %s", status, tc.starts, w.Body)
 			}
 		}
@@ -233,6 +234,7 @@ func TestDeliveryLatencyAndHolidayDoNotChangeOccurrenceClassification(t *testing
 
 func TestCacheUsesExactInstantButResponsesPreserveOccurrences(t *testing.T) {
 	s := newTestService(t)
+	s.now = func() time.Time { return instant(t, "2026-11-12T09:00:00+01:00") }
 	calls := 0
 	engine := s.evaluator
 	s.evaluator = evaluatorFunc(func(ctx context.Context, input PolicyInput, ref PolicyRef, sink string, at time.Time) (Decision, error) {
@@ -252,7 +254,7 @@ func TestCacheUsesExactInstantButResponsesPreserveOccurrences(t *testing.T) {
 	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		t.Fatal(w.Code, w.Body)
 	}
-	if calls != 3 || result.Eligible != 4 || result.Ineligible != 1 || len(result.Policies) != 4 {
+	if calls != 3 || result.Eligible != 4 || result.Ineligible != 0 || result.Unknown != 1 || len(result.Policies) != 4 {
 		t.Fatal(calls, result)
 	}
 	if result.Policies[1].AlertCount != 2 || result.Policies[2].Fingerprint != otherFingerprint.Fingerprint {

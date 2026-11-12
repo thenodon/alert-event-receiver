@@ -141,6 +141,16 @@ func (e *CalendarEngine) Evaluate(ctx context.Context, _ PolicyInput, ref Policy
 		date = date.AddDate(0, 0, 1)
 	}
 	decision.Reason = ReasonHorizonExhausted
+	// Expose the exhausted range without changing the window search. Use the
+	// existing instant projection for midnight gaps/folds and skipped dates.
+	for skipped := 0; skipped < 3 && date.Year() <= 9999; skipped++ {
+		boundary := nextOnDate(date, p.location, []minuteInterval{{0, 1440}}, at)
+		if !boundary.IsZero() {
+			decision.SearchUntil = boundary.UTC()
+			break
+		}
+		date = date.AddDate(0, 0, 1)
+	}
 	return decision, nil
 }
 
