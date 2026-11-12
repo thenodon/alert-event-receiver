@@ -1,6 +1,7 @@
 package slaproxy
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -174,5 +175,142 @@ func TestHolidayBlockSyntaxBeforeProviderValidation(t *testing.T) {
 		if err := validatePolicy(p); (err == nil) != tc.valid {
 			t.Fatalf("holidays %+v, valid=%v: %v", tc.h, tc.valid, err)
 		}
+	}
+}
+
+func TestDurableConfigExample(t *testing.T) {
+	f, err := os.Open("../../docs/examples/alert-sla-proxy-durable.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	c, err := LoadConfig(f)
+	if err != nil || !c.Durable.Enabled {
+		t.Fatal(c, err)
+	}
+}
+
+func TestDurableDefaultsAndValidation(t *testing.T) {
+	c := testConfig(t)
+	if c.Durable.Enabled {
+		t.Fatal("legacy config enables persistence")
+	}
+	c.Durable.Enabled = true
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	drain := c
+	drain.SLADefinitions = nil
+	if err := drain.Validate(); err != nil {
+		t.Fatal("durable resolution-only catalog rejected", err)
+	}
+	if c.Durable.Retention.CompletedPayload != 30*24*time.Hour || c.Durable.Retention.Tombstone != 90*24*time.Hour {
+		t.Fatal(c.Durable.Retention)
+	}
+	for name, mutate := range map[string]func(*DurableConfig){
+		"epoch":     func(c *DurableConfig) { c.PolicyEpoch = 0 },
+		"sink":      func(c *DurableConfig) { c.SinkID = "" },
+		"address":   func(c *DurableConfig) { c.Valkey.Address = "invalid" },
+		"namespace": func(c *DurableConfig) { c.Valkey.Namespace = "bad:*" },
+		"database":  func(c *DurableConfig) { c.Valkey.Database = -1 },
+		"workers":   func(c *DurableConfig) { c.Scheduler.Workers = 0 },
+		"batch":     func(c *DurableConfig) { c.Scheduler.BatchSize = 1001 },
+		"poll":      func(c *DurableConfig) { c.Scheduler.PollInterval = time.Millisecond },
+		"lease":     func(c *DurableConfig) { c.Scheduler.LeaseDuration = c.Scheduler.OperationTimeout },
+		"retry":     func(c *DurableConfig) { c.Scheduler.RetryMax = time.Millisecond },
+		"reconcile": func(c *DurableConfig) { c.Scheduler.ReconcileInterval = time.Millisecond },
+		"retention": func(c *DurableConfig) { c.Retention.Tombstone = c.Retention.CompletedPayload },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := c
+			mutate(&invalid.Durable)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("invalid configuration accepted")
+			}
+		})
+	}
+	for _, fragment := range []string{"  freshness: {mode: api}\n", "  valkey: {script: true}\n", "  unknown: true\n"} {
+		if _, err := LoadConfig(strings.NewReader(exampleConfig + "durable:\n  enabled: true\n" + fragment)); err == nil {
+			t.Fatal("unused/verification option accepted", fragment)
+		}
+	}
+}
+
+func TestDurableDimensionsAndLateResolution(t *testing.T) {
+	cfg := testConfig(t)
+	m := &DurableManager{cfg: cfg, engine: engineFor(t, businessPolicy(), 370)}
+	start := instant(t, "2026-11-09T07:30:00+01:00")
+	first := instant(t, "2026-11-09T08:00:00+01:00")
+	b := &DurableBinding{ID: "binding", SinkID: cfg.Durable.SinkID, Policy: PolicyRef{"sla_id", "business"}, PolicyVersion: m.engine.policies[PolicyRef{"sla_id", "business"}].version, Calendar: Decision{NextEvaluationAt: first}, Intents: map[string]*DeliveryIntent{}, Delivery: NotDelivered}
+	row := &DurableOccurrence{ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
+	m.advance(row, start.Add(time.Minute))
+	if b.Eligibility != EligibilityPending || row.Lifecycle != LifecycleFiring || b.Delivery != NotDelivered {
+		t.Fatal(row, b)
+	}
+	m.advance(row, first)
+	if b.Eligibility != EligibilityEligible || b.Delivery != PendingDelivery || !b.Intents["firing"].Ready || row.LastVerifiedActiveAt != nil {
+		t.Fatal(b)
+	}
+	row.Lifecycle, row.EndsAt = LifecycleResolved, utcPointer(first.Add(-time.Minute))
+	m.advance(row, first.Add(time.Hour))
+	if b.Eligibility != EligibilityIneligible || b.Intents["firing"].Ready || !b.Intents["firing"].Canceled || b.Delivery == Delivered {
+		t.Fatal(b)
+	}
+	// Reserved Phase 4 receipt evidence must preserve resolution continuity
+	// even if a delayed resolution corrects earlier provisional eligibility.
+	b.FiringDeliveredAt = utcPointer(first)
+	m.advance(row, first.Add(2*time.Hour))
+	if !b.Intents["resolved"].Ready || b.Delivery != PendingDelivery {
+		t.Fatal(b)
+	}
+}
+
+func TestDurableSLAOpportunities(t *testing.T) {
+	for _, tc := range []struct {
+		name, zone, day, window, start string
+		holidays                       *Holidays
+	}{
+		{"overnight", "Europe/Stockholm", "monday", "22:00-06:00", "2026-11-09T21:30:00+01:00", nil},
+		{"holiday", "Europe/Stockholm", "friday", "08:00-17:00", "2027-01-01T07:30:00+01:00", &Holidays{Country: "SE"}},
+		{"spring", "Europe/Stockholm", "sunday", "02:30-03:30", "2026-03-29T00:30:00Z", nil},
+		{"autumn", "Europe/Stockholm", "sunday", "02:15-02:45", "2026-10-25T00:50:00Z", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			p := Policy{Timezone: tc.zone, Schedule: map[string][]string{tc.day: {tc.window}}, Holidays: tc.holidays}
+			e := engineFor(t, p, 370)
+			m := &DurableManager{cfg: cfg, engine: e}
+			start := instant(t, tc.start)
+			ref := PolicyRef{"sla_id", "business"}
+			d, err := e.Evaluate(context.Background(), PolicyInput{}, ref, "", start)
+			if err != nil || d.NextEvaluationAt.IsZero() {
+				t.Fatal(d, err)
+			}
+			b := &DurableBinding{ID: "binding", Policy: ref, SinkID: cfg.Durable.SinkID, PolicyVersion: d.PolicyVersion, Calendar: d, Intents: map[string]*DeliveryIntent{}}
+			row := &DurableOccurrence{ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
+			m.advance(row, start)
+			if b.Eligibility != EligibilityPending || !b.NextEvaluationAt.Equal(d.NextEvaluationAt) {
+				t.Fatal(b)
+			}
+			m.advance(row, d.NextEvaluationAt)
+			if b.Eligibility != EligibilityEligible || b.Delivery != PendingDelivery || !b.Intents["firing"].Ready {
+				t.Fatal(b)
+			}
+		})
+	}
+}
+
+func TestSchedulerBackoffBounded(t *testing.T) {
+	m := &DurableManager{cfg: testConfig(t)}
+	for _, attempt := range []int{0, 1, 10, 100000} {
+		if d := m.retryDelay(attempt); d < m.cfg.Durable.Scheduler.RetryInitial || d > m.cfg.Durable.Scheduler.RetryMax {
+			t.Fatal(d)
+		}
+	}
+}
+
+func TestRejectStageNamedConfigurationKey(t *testing.T) {
+	if _, err := LoadConfig(strings.NewReader(exampleConfig + "phase3:\n  enabled: true\n")); err == nil {
+		t.Fatal("obsolete phase3 YAML key accepted")
 	}
 }

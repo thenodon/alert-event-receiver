@@ -1,0 +1,43 @@
+# No notification forwarding. Start a dedicated Valkey with persistence enabled.
+listen_address: ":9012"
+webhook_path: /webhook
+max_body_bytes: 1048576
+shutdown_timeout: 10s
+evaluation_horizon_days: 370
+sla_definitions:
+  - sla_label: sla_id
+    slas:
+      business-hours-se:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["08:00-17:00"]
+          tuesday: ["08:00-17:00"]
+          wednesday: ["08:00-17:00"]
+          thursday: ["08:00-17:00"]
+          friday: ["08:00-17:00"]
+        holidays:
+          country: SE
+          additional_dates: ["2027-12-24"]
+durable:
+  enabled: true
+  policy_epoch: 1 # Increase when changing the policy catalog or logical sink ID.
+  sink_id: default # Logical Phase 4 target only, not a downstream URL.
+  valkey:
+    address: "127.0.0.1:6379"
+    username: ""
+    password_env: "" # For authentication, name an environment variable here.
+    database: 0
+    namespace: sla
+    tls: false # Set true to use TLS with system CA roots; no insecure-skip option.
+  scheduler:
+    poll_interval: 1s
+    workers: 4
+    batch_size: 100
+    lease_duration: 30s
+    operation_timeout: 5s
+    retry_initial: 5s
+    retry_max: 5m
+    reconcile_interval: 30s
+  retention:
+    completed_payload: 720h # 30 days after first durable resolution receipt.
+    tombstone: 2160h       # 90 days after first durable resolution receipt.

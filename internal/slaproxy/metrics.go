@@ -6,16 +6,26 @@ import (
 )
 
 type metrics struct {
-	registry     *prometheus.Registry
-	requests     *prometheus.CounterVec
-	latency      *prometheus.HistogramVec
-	alerts       *prometheus.CounterVec
-	selected     *prometheus.CounterVec
-	skipped      *prometheus.CounterVec
-	calendar     *prometheus.CounterVec
-	eligibility  *prometheus.CounterVec
-	policyErrors *prometheus.CounterVec
-	holidays     *prometheus.CounterVec
+	registry              *prometheus.Registry
+	requests              *prometheus.CounterVec
+	latency               *prometheus.HistogramVec
+	alerts                *prometheus.CounterVec
+	selected              *prometheus.CounterVec
+	skipped               *prometheus.CounterVec
+	calendar              *prometheus.CounterVec
+	eligibility           *prometheus.CounterVec
+	policyErrors          *prometheus.CounterVec
+	holidays              *prometheus.CounterVec
+	storeOperations       *prometheus.CounterVec
+	storeErrors           *prometheus.CounterVec
+	transitions           *prometheus.CounterVec
+	claims                *prometheus.CounterVec
+	schedulerEvaluations  *prometheus.CounterVec
+	schedulerErrors       *prometheus.CounterVec
+	schedulerLag          prometheus.Histogram
+	unresolvedOccurrences prometheus.Gauge
+	pendingOccurrences    prometheus.Gauge
+	heldOccurrences       prometheus.Gauge
 }
 
 func newMetrics(cfg Config) *metrics {
@@ -48,9 +58,20 @@ func newMetrics(cfg Config) *metrics {
 		holidays: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sla_proxy_holiday_evaluations_total", Help: "Country calendar checks, including future dates searched, by configured country and result; not alert counts.",
 		}, []string{"country", "result"}),
+		storeOperations:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_state_store_operations_total", Help: "State-store API calls by operation and outcome, including bounded optimistic retries within a call."}, []string{"operation", "result"}),
+		storeErrors:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_state_store_errors_total", Help: "Failed state-store operations; commits may be ambiguous on connection loss."}, []string{"operation"}),
+		transitions:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_lifecycle_transitions_total", Help: "Committed lifecycle transitions, excluding duplicate notifications."}, []string{"from", "to", "reason"}),
+		claims:                prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_scheduler_claims_total", Help: "Scheduler claim outcomes."}, []string{"result"}),
+		schedulerEvaluations:  prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_scheduler_evaluations_total", Help: "Scheduler evaluations committed or fenced."}, []string{"result"}),
+		schedulerErrors:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_scheduler_errors_total", Help: "Scheduler operational failures."}, []string{"operation"}),
+		schedulerLag:          prometheus.NewHistogram(prometheus.HistogramOpts{Name: "sla_proxy_scheduler_lag_seconds", Help: "Delay from scheduled evaluation to claim, excluding future deadlines.", Buckets: prometheus.DefBuckets}),
+		unresolvedOccurrences: prometheus.NewGauge(prometheus.GaugeOpts{Name: "sla_proxy_unresolved_occurrences", Help: "Namespace-wide known firing occurrences, including held entries; reconciled periodically. Do not sum replicas."}),
+		pendingOccurrences:    prometheus.NewGauge(prometheus.GaugeOpts{Name: "sla_proxy_pending_occurrences", Help: "Namespace-wide firing occurrences with pending eligibility, including held entries; reconciled periodically. Do not sum replicas."}),
+		heldOccurrences:       prometheus.NewGauge(prometheus.GaugeOpts{Name: "sla_proxy_held_occurrences", Help: "Namespace-wide occurrences with policy, horizon or resolution-conflict holds; reconciled periodically. Do not sum replicas."}),
 	}
 	m.registry.MustRegister(m.requests, m.latency, m.alerts, m.selected, m.skipped,
 		m.calendar, m.eligibility, m.policyErrors, m.holidays,
+		m.storeOperations, m.storeErrors, m.transitions, m.claims, m.schedulerEvaluations, m.schedulerErrors, m.schedulerLag, m.unresolvedOccurrences, m.pendingOccurrences, m.heldOccurrences,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	for _, status := range []string{"2xx", "4xx", "5xx"} {
 		m.requests.WithLabelValues(status)

@@ -111,6 +111,10 @@ func (s *Service) webhook(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid webhook payload", status)
 		return
 	}
+	if s.durable != nil {
+		status = s.durableWebhook(w, r, *payload)
+		return
+	}
 	result := Observation{SchemaVersion: 2, Mode: "observe_only", Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Policies: []PolicyObservation{}}
 	// Cache calendar work only. Lifecycle conclusions also depend on status,
 	// resolution time and the observation cutoff, never just policy/startsAt.

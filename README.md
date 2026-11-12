@@ -245,37 +245,38 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
-## Alert SLA Proxy (Phase 2)
+## Alert SLA Proxy (Phases 2–3)
 
-The separate `alert-sla-proxy` service validates Alertmanager webhooks, selects
-independent label-based SLA policies, and distinguishes calendar eligibility at
-`startsAt` from overlap of the alert's active interval with SLA windows. It
-evaluates IANA weekly schedules and optional public
-holidays for Sweden, Germany nationally, or Bavaria, plus explicit dates.
-It remains stateless: it does not connect to Valkey, persist, schedule or forward
-alerts. Keep existing operational receivers active through test/fan-out routing.
-HTTP 200 acknowledges observation only, with explicit `persisted: false` and
-`forwarded: false` fields. Runtime evaluation failures return HTTP 500.
+The separate `alert-sla-proxy` selects label-based SLA policies and evaluates
+weekly IANA schedules, holidays and active-interval overlap. By default it is
+stateless `observe_only`. Opt-in Phase 3 persists occurrences in Valkey, schedules
+pending alerts, handles out-of-order resolutions and prepares durable intent.
+It never forwards notifications or marks them delivered.
 
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
+# Stateless observation:
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
+# Or durable lifecycle/scheduling, with a configured persistent Valkey:
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-durable.yaml
 ```
 
-The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz` and
-`/readyz`. Readiness represents observation capability only. YAML configuration
-is strictly validated, including calendar coverage and cross-weekday overlaps;
-independent SLA maps preserve definition order. Missing selection labels and
-unknown SLA identifiers are counted per-alert skips. Responses include per-policy
-schema-version-2 calendar and lifecycle observations (eligible, ineligible,
-pending, unknown or error). Resolved alerts use [startsAt, endsAt); delayed firing
-is not proof of current activity. next_eligible_at remains a calendar opportunity,
-not scheduled work. Calendar and lifecycle metrics use separate explicit names.
+Phase 3 trusts Alertmanager's webhook lifecycle. If an SLA opportunity arrives
+without a recorded resolution, the occurrence is considered firing in known
+state. There is no API verification, silence/inhibition recheck or invented
+freshness timeout. A delayed/lost resolution can therefore produce eligibility
+for an alert already resolved underneath; this limitation is accepted and logged.
 
-See the [SLA proxy guide](docs/alert-sla-proxy.md),
-[configuration example](docs/examples/alert-sla-proxy.yaml), and
-[decision register](docs/sla-proxy-decisions.md) for contracts and later-phase gates.
-Existing event receiver lifecycle, Valkey and OTLP behavior is unchanged.
+Durable mode acknowledges HTTP 200 only after all selected occurrences commit;
+partial/store failures return 503 and the batch is safely retryable. Valkey
+acceptance is not unconditional disk/replica persistence. Lifecycle, SLA eligibility
+and delivery status remain independent; policy changes hold pending bindings.
+The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz`, `/readyz`.
+Existing receiver lifecycle, Valkey schema and OTLP behavior are unchanged.
+
+See the [service guide](docs/alert-sla-proxy.md),
+[Phase 3 implementation and operations](docs/sla-proxy-phase3.md), and
+[decision register](docs/sla-proxy-decisions.md).
 
 ## Load testing
 
@@ -558,7 +559,7 @@ inspection and idempotency troubleshooting.
 
 ## Current limitations and roadmap
 
-The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy evaluates calendars in observation mode; its scheduling and delivery remain deferred.
+The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation and opt-in durable SLA scheduling; downstream delivery remains deferred.
 
 v0.2.0 focuses on best-effort delivery observability. It adds no persistent queue, retries, replay, policies, or sinks.
 
@@ -567,8 +568,8 @@ v0.2.0 focuses on best-effort delivery observability. It adds no persistent queu
 ```text
 cmd/server/          Receiver entry point
 cmd/alertload/       Independent webhook lifecycle load generator
-cmd/alert-sla-proxy/ Independent observation-only SLA proxy
-internal/slaproxy/   SLA configuration, calendar evaluation, HTTP service and metrics
+cmd/alert-sla-proxy/ Independent SLA proxy (observation or durable state)
+internal/slaproxy/   SLA calendars, durable lifecycle/store, scheduler, HTTP and metrics
 internal/alertload/  Generator, bounded scheduler, HTTP workers and reports
 internal/config/     Environment configuration
 internal/models/     Alertmanager and lifecycle event models

@@ -1,4 +1,4 @@
-# Alert SLA Proxy — Phase 2
+# Alert SLA Proxy — Phase 2 observation and Phase 3 durable state
 
 `alert-sla-proxy` is an independent, stateless observation service. It validates
 Alertmanager notifications, selects label-based SLA policies and evaluates their
@@ -6,6 +6,20 @@ calendar eligibility plus alert active-interval overlap. It **does not persist a
 connect to Valkey, schedule work or forward notifications**. Keep operational
 receivers active through test/fan-out routing. Calendar results are observations,
 not enforced downstream delivery decisions.
+
+**Phase 3 is now opt-in:** `durable.enabled: true` persists occurrences and runs
+an SLA scheduler using the approved webhook-authoritative lifecycle. It does not
+forward notifications. See the [Phase 3 guide](sla-proxy-phase3.md) and
+[durable configuration example](examples/alert-sla-proxy-durable.yaml) for state,
+transactions, retention, policy epochs, recovery and metrics. There is no
+Alertmanager API verification or receipt-based freshness timeout.
+
+The calendar/lifecycle evidence tables below describe **Phase 2 observe_only
+responses and notification observation metrics**. Phase 3's durable known state
+trusts firing until a resolution is received: a passed opportunity can therefore
+be durable eligible even when the Phase 2 per-notification evidence remains
+unknown. This distinction is intentional; lost/delayed resolutions are an accepted
+limitation of the approved Phase 3 architecture.
 
 The existing event receiver continues to process lifecycle transitions and emit
 OTLP logs independently. SLA selections do not generate lifecycle OTLP events.
@@ -163,7 +177,7 @@ Rebuild/retest after time-zone data updates; config changes require restart.
 | POST | configured webhook path | Validate and observe a notification batch |
 | GET | `/metrics` | Independent Prometheus registry |
 | GET | `/healthz` | HTTP liveness |
-| GET | `/readyz` | Observation capability; HTTP 503 while stopping |
+| GET | `/readyz` | Observation capability, or active policy/store readiness in Phase 3; HTTP 503 while stopping/unavailable |
 
 Webhook input uses the shared Alertmanager v4 wire model. Strict JSON decoding
 rejects unknown fields, duplicate keys, null payloads, malformed timestamps and
@@ -318,5 +332,5 @@ Alertmanager integration before deployment; httptest tests exercise the proxy,
 not Alertmanager routing itself.
 
 See the [decision register](sla-proxy-decisions.md) for architecture reuse and
-approval gates. Durable scheduling/state, sink delivery and real enrichment
-remain outside this implementation.
+approval gates. Phase 3 durable state/scheduling is described in its separate
+guide; sink delivery and real enrichment remain outside this implementation.
