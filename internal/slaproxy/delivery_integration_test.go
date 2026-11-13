@@ -105,6 +105,7 @@ func TestDeliveryLoggingSinkAndOrderedReceipts(t *testing.T) {
 	}
 	defer s.Close()
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
+	deliveryBegan := time.Now().UTC()
 	dispatch(t, s, row.ID)
 	fired := deliveryRow(t, s, row.ID)
 	b := onlyBinding(t, fired)
@@ -136,6 +137,16 @@ func TestDeliveryLoggingSinkAndOrderedReceipts(t *testing.T) {
 			t.Fatal(err)
 		}
 		if log["msg"] == "SLA alert delivered" {
+			stamp, err := time.Parse(time.RFC3339Nano, log["time"].(string))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stamp.Before(deliveryBegan) || stamp.After(time.Now().UTC()) || log["delivery_at"] != log["time"] || log["starts_at"] != row.StartsAt.Format(time.RFC3339Nano) {
+				t.Fatal("delivery log uses historical or changed alert timestamps", log)
+			}
+			if log["action"] == "resolved" && log["ends_at"] != closed.EndsAt.Format(time.RFC3339Nano) {
+				t.Fatal("resolution timestamp replaced", log)
+			}
 			actions = append(actions, log["action"].(string))
 		}
 	}

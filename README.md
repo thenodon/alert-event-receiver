@@ -277,6 +277,9 @@ acceptance is not unconditional disk/replica persistence. Lifecycle, SLA eligibi
 and delivery status remain independent; policy changes hold pending bindings.
 The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz`, `/readyz`.
 Existing receiver lifecycle, Valkey schema and OTLP behavior are unchanged.
+Upgrading an existing SLA namespace to the hardened store protocol requires a
+higher `durable.policy_epoch`. See the [hardening guide](docs/sla-proxy-hardening.md)
+for index-corruption quarantine/recovery and concurrent delivery measurements.
 
 See the [service guide](docs/alert-sla-proxy.md),
 [Phase 3 implementation and operations](docs/sla-proxy-phase3.md), and

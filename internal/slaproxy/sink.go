@@ -26,7 +26,6 @@ type DeliveryEvent struct {
 	StartsAt      time.Time
 	EndsAt        *time.Time
 	EligibleAt    time.Time
-	EventAt       time.Time
 	Attempt       uint64
 }
 
@@ -65,7 +64,10 @@ type DeliveryClaim struct {
 // LogSink calls Handler.Handle directly so reported write errors reach delivery
 // retry handling. slog.Logger.Info discards such errors. Success does not imply
 // fsync, downstream collection or durability of a custom asynchronous handler.
-type LogSink struct{ Handler slog.Handler }
+type LogSink struct {
+	Handler slog.Handler
+	Now     func() time.Time // Optional clock for deterministic tests; defaults to time.Now.
+}
 
 func (s LogSink) Deliver(ctx context.Context, e DeliveryEvent) error {
 	if err := ctx.Err(); err != nil {
@@ -74,11 +76,16 @@ func (s LogSink) Deliver(ctx context.Context, e DeliveryEvent) error {
 	if s.Handler == nil || !s.Handler.Enabled(ctx, slog.LevelInfo) {
 		return errors.New("delivery log handler unavailable or INFO disabled")
 	}
-	r := slog.NewRecord(e.EventAt.UTC(), slog.LevelInfo, "SLA alert delivered", 0)
+	now := time.Now
+	if s.Now != nil {
+		now = s.Now
+	}
+	deliveredAt := now().UTC()
+	r := slog.NewRecord(deliveredAt, slog.LevelInfo, "SLA alert delivered", 0)
 	r.AddAttrs(slog.String("component", "sla_sink"), slog.String("sink_id", e.SinkID), slog.String("sink_type", "log"),
 		slog.String("action", e.Action), slog.String("occurrence_id", e.OccurrenceID), slog.String("binding_id", e.BindingID), slog.String("intent_id", e.IntentID),
 		slog.String("sla_label", e.Policy.SLALabel), slog.String("sla_value", e.Policy.SLAValue), slog.String("policy_version", e.PolicyVersion),
-		slog.Time("starts_at", e.StartsAt.UTC()), slog.Time("eligible_at", e.EligibleAt.UTC()), slog.Uint64("delivery_attempt", e.Attempt))
+		slog.Time("delivery_at", deliveredAt), slog.Time("starts_at", e.StartsAt.UTC()), slog.Time("eligible_at", e.EligibleAt.UTC()), slog.Uint64("delivery_attempt", e.Attempt))
 	if e.EndsAt != nil {
 		r.AddAttrs(slog.Time("ends_at", e.EndsAt.UTC()))
 	}

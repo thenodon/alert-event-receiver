@@ -376,7 +376,7 @@ receipts in Valkey and delivery metrics/logs show dispatcher outcomes.
 ```yaml
 durable:
   enabled: true
-  policy_epoch: 2
+  policy_epoch: 3
   sink_id: default
   # Other Valkey/scheduler/retention settings: see complete example.
 delivery:
@@ -409,9 +409,11 @@ be at least the poll interval; retry maximum must be at least initial and at mos
 1h. Unknown YAML fields still fail strict decoding.
 
 Before enabling in an existing namespace, upgrade **all instances** to this
-version and increase `durable.policy_epoch`. Delivery activation changes the
-registry digest with a `delivery-v1` format/implementation marker, while disabled
-mode keeps the Phase 3 digest unchanged. An unchanged epoch with a different
+version and increase `durable.policy_epoch`. Delivery activation includes a
+`delivery-v1` format/implementation marker. The hardened store additionally uses
+`index-schema-v1` in both durable modes, so upgrading an existing state-only or
+delivery-enabled namespace also requires a higher epoch. Individual SLA policy
+versions and existing occurrence/intent identities are unchanged. An unchanged epoch with a different
 mode fails startup. The higher epoch fences old running instances, and affected
 instances fail readiness and cannot commit. Do not run an old binary against an
 activated namespace or try to downgrade it by increasing its epoch.
@@ -467,6 +469,15 @@ for deadline-based delivery discovery. Bounded reconciliation repairs missing or
 inconsistent secondary indexes without rewriting unchanged records. Claims also
 use a separate expiring `delivery-claim:<occurrence-id>` token key with an absolute
 expiration, so unrelated webhook writes do not renew the lease.
+
+Shared indexes are not WATCHed: normal updates address individual occurrence
+members and can commit independently. Occurrence documents, claim tokens, policy/
+destination registries and the schema fence are protected. TYPE preflight is not
+atomic protection against an external actor changing an index type; a detected
+violation or EXEC command error stops processing and quarantines the namespace.
+**A partial record write is possible on that failed EXEC and is not acknowledged.**
+See the [hardening safety strategy and repair procedure](sla-proxy-hardening.md)
+for the schema ownership contract, operator fencing and exact changed guarantees.
 
 Every claim/authorization/receipt uses WATCH/MULTI/EXEC, the existing JSON source
 of truth and guarded index updates. No transaction is held during the sink call.
@@ -530,9 +541,10 @@ optional known ends_at and authorized attempt number. Full labels, annotations
 and payloads are omitted. Retry payloads remain original Alertmanager notification
 information; enrichment is not introduced.
 
-The record's timestamp is the alert event time: startsAt for firing and endsAt
-for resolution, serialized in UTC with nanosecond precision. It is **not the
-current send time**, so historical test alerts appear in historical log queries.
+The record's timestamp is captured at the logging sink boundary and represents
+**current delivery attempt time**, in UTC with nanosecond precision. The matching
+`delivery_at` attribute has the same value. Historical starts_at, ends_at and
+eligible_at remain separate attributes; they do not set the record timestamp.
 `SLA delivery receipt committed` is a separate current-time processing log.
 Receipt delivered_at is the observed completion time of the successful sink call;
 committed_at is the Valkey server time used for the receipt transaction. Attempt
@@ -586,3 +598,7 @@ real enrichment and guarantees of downstream storage remain unimplemented.
 
 See [Phase 4A validation and regression measurements](sla-proxy-phase4a-validation.md)
 for executed checks, scenario coverage, benchmark methodology and raw samples.
+
+
+The [Phase 4A hardening report](sla-proxy-hardening.md) documents narrowed WATCH
+scope, corruption safety, delivery-time logging and concurrent delivery benchmarks.

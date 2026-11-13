@@ -77,7 +77,8 @@ func (m *DurableManager) runOne(ctx context.Context, id string) error {
 // maintenance is cursor-based and handles at most BatchSize occurrence records
 // per tick, plus a bounded retention batch. SCAN COUNT is a server hint; an
 // oversized returned page is buffered and processed on subsequent ticks.
-func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) error {
+func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) (err error) {
+	defer func() { err = m.store.readError(ctx, err) }()
 	ids, err := m.store.due(ctx, "retention", m.cfg.Durable.Scheduler.BatchSize)
 	if err != nil {
 		return err
@@ -172,7 +173,8 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 // reconcileIndex also removes orphan memberships that have no occurrence row,
 // including future scores and ready intents with no scheduling deadline. Rotate
 // indexes and buffer oversized SCAN pages to bound work per maintenance tick.
-func (m *DurableManager) reconcileIndex(ctx context.Context) error {
+func (m *DurableManager) reconcileIndex(ctx context.Context) (err error) {
+	defer func() { err = m.store.readError(ctx, err) }()
 	indexes := []string{"unresolved", "pending", "held", "intent-index", "delivery-ready", "delivery-claimed", "delivery-held", "due", "retention", "delivery-due"}
 	index := indexes[m.indexPosition]
 	if len(m.indexPending) == 0 {
@@ -234,7 +236,7 @@ func (m *DurableManager) Run(ctx context.Context) error {
 					if err := m.runOne(ctx, id); err != nil {
 						m.store.metrics.schedulerErrors.WithLabelValues("evaluate").Inc()
 						m.logger.Error("SLA scheduler evaluation failed", "component", "sla_scheduler", "operation", "evaluate", "occurrence_id", id, "error", err.Error())
-						if errors.Is(err, ErrPolicyEpoch) {
+						if errors.Is(err, ErrPolicyEpoch) || errors.Is(err, ErrIndexSchema) {
 							select {
 							case fatal <- err:
 							default:
@@ -269,7 +271,7 @@ func (m *DurableManager) Run(ctx context.Context) error {
 	}
 	if err := maintenance(); err != nil {
 		m.store.metrics.schedulerErrors.WithLabelValues("reconcile").Inc()
-		if errors.Is(err, ErrPolicyEpoch) {
+		if errors.Is(err, ErrPolicyEpoch) || errors.Is(err, ErrIndexSchema) {
 			return err
 		}
 	}
@@ -283,7 +285,7 @@ func (m *DurableManager) Run(ctx context.Context) error {
 			if err := maintenance(); err != nil {
 				m.store.metrics.schedulerErrors.WithLabelValues("reconcile").Inc()
 				m.logger.Error("SLA state reconciliation failed", "component", "sla_scheduler", "operation", "reconcile", "error", err.Error())
-				if errors.Is(err, ErrPolicyEpoch) {
+				if errors.Is(err, ErrPolicyEpoch) || errors.Is(err, ErrIndexSchema) {
 					return err
 				}
 			}

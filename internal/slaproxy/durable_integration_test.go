@@ -708,7 +708,7 @@ func TestValkeyReconciliationRepairFencedByResolution(t *testing.T) {
 	}
 }
 
-func TestValkeyPipelinedTypeChecksRemainWatched(t *testing.T) {
+func TestValkeyRacingIndexCorruptionQuarantinesPartialCommit(t *testing.T) {
 	f := realValkey(t)
 	m := manager(t, integrationConfig(t, f))
 	ctx := context.Background()
@@ -716,8 +716,8 @@ func TestValkeyPipelinedTypeChecksRemainWatched(t *testing.T) {
 	before := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Val()
 	var once sync.Once
 	_, err := m.store.update(ctx, row.ID, func(current *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
-		// Corrupt an index after its TYPE check. WATCH must abort the queued
-		// transaction; its retry must detect corruption before writing any state.
+		// Bypass the schema protocol after TYPE preflight. EXEC can partially
+		// succeed. Detect it, never acknowledge, and quarantine the namespace.
 		once.Do(func() {
 			if err := m.store.client.Del(ctx, m.store.key("due")).Err(); err != nil {
 				t.Fatal(err)
@@ -729,10 +729,23 @@ func TestValkeyPipelinedTypeChecksRemainWatched(t *testing.T) {
 		current.Fence++
 		return current, nil
 	})
-	if err == nil {
-		t.Fatal("concurrent wrong-type corruption accepted")
+	if !errors.Is(err, ErrIndexSchema) {
+		t.Fatal("partial EXEC not quarantined", err)
 	}
-	if after := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Val(); after != before {
-		t.Fatal("state changed across corrupt index")
+	var oldState, partial DurableOccurrence
+	if err := json.Unmarshal([]byte(before), &oldState); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(m.store.client.Get(ctx, m.store.rowKey(row.ID)).Val()), &partial); err != nil {
+		t.Fatal(err)
+	}
+	if partial.Fence != oldState.Fence+1 || partial.Version != oldState.Version+1 {
+		t.Fatal("test did not exercise a partial EXEC", partial)
+	}
+	if err := m.store.health(ctx); !errors.Is(err, ErrIndexSchema) {
+		t.Fatal("quarantine did not stop readiness", err)
+	}
+	if _, err := New(m.cfg, slog.New(slog.NewJSONHandler(io.Discard, nil))); !errors.Is(err, ErrIndexSchema) {
+		t.Fatal("restart bypassed quarantine", err)
 	}
 }

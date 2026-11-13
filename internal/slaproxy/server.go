@@ -67,7 +67,10 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), cfg.Durable.Scheduler.OperationTimeout)
 		err := client.Ping(ctx).Err()
 		if err == nil {
-			err = store.activate(ctx)
+			err = store.initSchema(ctx)
+			if err == nil {
+				err = store.activate(ctx)
+			}
 			if err == nil && cfg.Delivery.Enabled {
 				err = store.activateSink(ctx)
 			}

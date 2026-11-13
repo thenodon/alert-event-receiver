@@ -18,9 +18,10 @@ func (errorWriter) Write([]byte) (int, error) { return 0, errors.New("sensitive-
 
 func TestLogSinkRecordAndWriteErrors(t *testing.T) {
 	var output bytes.Buffer
-	sink := LogSink{Handler: slog.NewJSONHandler(&output, nil)}
-	at := time.Date(2026, 11, 13, 7, 43, 0, 123456789, time.UTC)
-	e := DeliveryEvent{IntentID: "stable-intent", OccurrenceID: "occurrence", BindingID: "binding", SinkID: "default", Action: "firing", Policy: PolicyRef{"sla_id", "bronze"}, PolicyVersion: "version", StartsAt: at, EligibleAt: at, EventAt: at, Attempt: 2}
+	deliveryAt := time.Date(2026, 11, 13, 9, 0, 0, 987654321, time.UTC)
+	sink := LogSink{Handler: slog.NewJSONHandler(&output, nil), Now: func() time.Time { return deliveryAt }}
+	at := time.Date(2026, 11, 13, 7, 30, 0, 123456789, time.UTC)
+	e := DeliveryEvent{IntentID: "stable-intent", OccurrenceID: "occurrence", BindingID: "binding", SinkID: "default", Action: "firing", Policy: PolicyRef{"sla_id", "bronze"}, PolicyVersion: "version", StartsAt: at, EligibleAt: at, Attempt: 2}
 	e.Notification.Alert.Labels = map[string]string{"secret": "never-log-me"}
 	e.Notification.Alert.Annotations = map[string]string{"token": "never-log-me"}
 	if err := sink.Deliver(context.Background(), e); err != nil {
@@ -30,13 +31,26 @@ func TestLogSinkRecordAndWriteErrors(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
 		t.Fatal(err)
 	}
-	for key, want := range map[string]any{"msg": "SLA alert delivered", "component": "sla_sink", "sink_type": "log", "sink_id": "default", "action": "firing", "intent_id": "stable-intent", "occurrence_id": "occurrence", "binding_id": "binding", "sla_label": "sla_id", "sla_value": "bronze", "policy_version": "version", "delivery_attempt": float64(2), "time": at.Format(time.RFC3339Nano), "starts_at": at.Format(time.RFC3339Nano), "eligible_at": at.Format(time.RFC3339Nano)} {
+	for key, want := range map[string]any{"msg": "SLA alert delivered", "component": "sla_sink", "sink_type": "log", "sink_id": "default", "action": "firing", "intent_id": "stable-intent", "occurrence_id": "occurrence", "binding_id": "binding", "sla_label": "sla_id", "sla_value": "bronze", "policy_version": "version", "delivery_attempt": float64(2), "time": deliveryAt.Format(time.RFC3339Nano), "delivery_at": deliveryAt.Format(time.RFC3339Nano), "starts_at": at.Format(time.RFC3339Nano), "eligible_at": at.Format(time.RFC3339Nano)} {
 		if record[key] != want {
 			t.Fatal(key, record[key], want)
 		}
 	}
 	if strings.Contains(output.String(), "never-log-me") {
 		t.Fatal("payload leaked")
+	}
+	output.Reset()
+	endsAt := at.Add(30 * time.Minute)
+	e.Action = "resolved"
+	e.EndsAt = &endsAt
+	if err := sink.Deliver(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(output.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["time"] != deliveryAt.Format(time.RFC3339Nano) || record["delivery_at"] != deliveryAt.Format(time.RFC3339Nano) || record["starts_at"] != at.Format(time.RFC3339Nano) || record["ends_at"] != endsAt.Format(time.RFC3339Nano) {
+		t.Fatal("resolved delivery timestamp changed alert timestamps", record)
 	}
 	sink.Handler = slog.NewJSONHandler(errorWriter{}, nil)
 	if err := sink.Deliver(context.Background(), e); err == nil {

@@ -145,12 +145,8 @@ func deliveryEvent(row *DurableOccurrence) DeliveryEvent {
 	c := row.DeliveryClaim
 	b := row.Bindings[c.BindingID]
 	i := b.Intents[c.Action]
-	at := row.StartsAt
-	if c.Action == "resolved" {
-		at = *row.EndsAt
-	}
 	return DeliveryEvent{IntentID: i.ID, OccurrenceID: row.ID, BindingID: b.ID, SinkID: b.SinkID, Action: i.Action, Policy: b.Policy, PolicyVersion: b.PolicyVersion,
-		Notification: *i.Payload, StartsAt: row.StartsAt, EndsAt: row.EndsAt, EligibleAt: b.Calendar.NextEvaluationAt, EventAt: at, Attempt: i.Attempts}
+		Notification: *i.Payload, StartsAt: row.StartsAt, EndsAt: row.EndsAt, EligibleAt: b.Calendar.NextEvaluationAt, Attempt: i.Attempts}
 }
 func deliveryFailure(err error) string {
 	var failure *DeliveryError
@@ -261,6 +257,9 @@ func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
 		d.metrics.retries.WithLabelValues(event.SinkID, event.Action).Inc()
 	}
 	// No Valkey transaction or pooled WATCH connection is held during sink I/O.
+	if d.manager.store.quarantined.Load() {
+		return ErrIndexSchema
+	}
 	call, stopCall := context.WithTimeout(ctx, d.manager.cfg.Delivery.Dispatcher.DeliveryTimeout)
 	began := time.Now()
 	sinkErr := d.sink.Deliver(call, event)
@@ -280,17 +279,18 @@ func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
 	defer stop()
 	err = d.finish(op, authorized, event, sinkErr, deliveredAt)
 	if err != nil {
-		d.manager.logger.Error("SLA delivery outcome not committed", "component", "sla_delivery", "operation", "receipt", "intent_id", event.IntentID, "sink_id", event.SinkID, "fenced", errors.Is(err, ErrFenced))
+		d.manager.logger.Error("SLA delivery outcome commit not confirmed", "component", "sla_delivery", "operation", "receipt", "intent_id", event.IntentID, "sink_id", event.SinkID, "fenced", errors.Is(err, ErrFenced))
 	}
 	return err
 }
 
-func (d *DeliveryDispatcher) poll(ctx context.Context) ([]string, error) {
+func (d *DeliveryDispatcher) poll(ctx context.Context) (ids []string, err error) {
+	defer func() { err = d.manager.store.readError(ctx, err) }()
 	s := d.manager.store
 	if err := s.health(ctx); err != nil {
 		return nil, err
 	}
-	ids, err := s.due(ctx, "delivery-due", d.manager.cfg.Delivery.Dispatcher.BatchSize)
+	ids, err = s.due(ctx, "delivery-due", d.manager.cfg.Delivery.Dispatcher.BatchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -334,7 +334,7 @@ func (d *DeliveryDispatcher) Run(ctx context.Context) error {
 				case id := <-jobs:
 					if err := d.runOne(ctx, id); err != nil {
 						d.metrics.errors.WithLabelValues("dispatch").Inc()
-						if errors.Is(err, ErrPolicyEpoch) {
+						if errors.Is(err, ErrPolicyEpoch) || errors.Is(err, ErrIndexSchema) {
 							select {
 							case fatal <- err:
 							default:
@@ -377,7 +377,7 @@ func (d *DeliveryDispatcher) Run(ctx context.Context) error {
 		if err != nil {
 			d.metrics.errors.WithLabelValues("poll").Inc()
 			d.manager.logger.Error("SLA delivery polling failed", "component", "sla_delivery", "operation", "poll")
-			if errors.Is(err, ErrPolicyEpoch) {
+			if errors.Is(err, ErrPolicyEpoch) || errors.Is(err, ErrIndexSchema) {
 				return err
 			}
 			nextPoll = time.Now().Add(d.retryDelay(failures))

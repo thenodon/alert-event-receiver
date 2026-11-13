@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -34,6 +35,8 @@ type DurableStore struct {
 	metrics         *metrics
 	deliveryEnabled bool
 	sinkType        string
+	schema          string
+	quarantined     atomic.Bool
 }
 
 func newDurableStore(client *redis.Client, config Config, engine *CalendarEngine, metrics *metrics) *DurableStore {
@@ -56,6 +59,7 @@ func newDurableStore(client *redis.Client, config Config, engine *CalendarEngine
 	if config.Delivery.Enabled {
 		digest = tupleID(digest, "delivery-v1", config.Delivery.Sink.Type)
 	}
+	digest = tupleID(digest, "index-schema-v1")
 	return &DurableStore{client: client, cfg: cfg, deliveryEnabled: config.Delivery.Enabled, sinkType: config.Delivery.Sink.Type, prefix: cfg.Valkey.Namespace + ":{sla}:", registry: policyRegistry{cfg.PolicyEpoch, digest}, metrics: metrics}
 }
 
@@ -64,6 +68,9 @@ func (s *DurableStore) rowKey(id string) string   { return s.key("occ:" + id) }
 func (s *DurableStore) claimKey(id string) string { return s.key("claim:" + id) }
 
 func (s *DurableStore) health(ctx context.Context) error {
+	if err := s.checkSchema(ctx, s.client); err != nil {
+		return err
+	}
 	data, err := s.client.Get(ctx, s.key("policies")).Bytes()
 	if err != nil {
 		return err
@@ -140,6 +147,9 @@ func (s *DurableStore) activate(ctx context.Context) (err error) {
 
 func (s *DurableStore) load(ctx context.Context, id string) (row *DurableOccurrence, err error) {
 	defer func() { s.record("load", err) }()
+	if err := s.checkSchema(ctx, s.client); err != nil {
+		return nil, err
+	}
 	data, err := s.client.Get(ctx, s.rowKey(id)).Bytes()
 	if err == redis.Nil {
 		return nil, nil
@@ -228,33 +238,21 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 			types[key] = kind
 		}
 	}
-	keys := make([]string, 0, len(types))
-	for key := range types {
-		keys = append(keys, key)
+	// Shared index members for independent IDs commute. Only authoritative
+	// state, coordination and schema/configuration fences belong in WATCH.
+	keys := []string{s.rowKey(id), s.claimKey(id), s.deliveryClaimKey(id), s.key("policies"), s.schemaKey()}
+	if s.deliveryEnabled {
+		keys = append(keys, s.destinationKey())
 	}
 	for attempt := 0; attempt < 64; attempt++ {
 		err = s.client.Watch(ctx, func(tx *redis.Tx) error {
-			// Keep every type check under WATCH, but send the independent
-			// reads in one round trip. No validation is cached or omitted.
-			checked := make(map[string]*redis.StatusCmd, len(types))
-			_, err := tx.Pipelined(ctx, func(p redis.Pipeliner) error {
-				for key := range types {
-					checked[key] = p.Type(ctx, key)
-				}
-				return nil
-			})
-			if err != nil {
+			if err := s.checkSchema(ctx, tx); err != nil {
 				return err
 			}
-			for key, command := range checked {
-				actual, err := command.Result()
-				if err != nil {
-					return err
-				}
-				if actual != "none" && actual != types[key] {
-					return fmt.Errorf("unexpected type for SLA store key %s: %s", key, actual)
-				}
+			if err := s.checkTypes(ctx, tx, types); err != nil {
+				return err
 			}
+
 			data, err := tx.Get(ctx, s.key("policies")).Bytes()
 			if err != nil {
 				return err
@@ -279,17 +277,11 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 			}
 			deliveryKeys := s.deliveryEnabled || old.hasDelivery()
 			if deliveryKeys && !s.deliveryEnabled {
-				for key, kind := range s.deliveryKeyTypes(id) {
-					if err := tx.Watch(ctx, key).Err(); err != nil {
-						return err
-					}
-					actual, err := tx.Type(ctx, key).Result()
-					if err != nil {
-						return err
-					}
-					if actual != "none" && actual != kind {
-						return fmt.Errorf("invalid delivery index type")
-					}
+				if err := tx.Watch(ctx, s.destinationKey()).Err(); err != nil {
+					return err
+				}
+				if err := s.checkTypes(ctx, tx, s.deliveryKeyTypes(id)); err != nil {
+					return err
 				}
 			}
 			if s.deliveryEnabled {
@@ -374,9 +366,13 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 					}
 				}
 			}
-			// Type checks and all relevant keys are WATCHed, including expiring
-			// claim keys. EXEC cannot succeed across token expiry or replacement.
-			_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+			// Claim tokens and the schema fence remain WATCHed. Shared index
+			// types are preflighted under the schema ownership contract; runtime
+			// command errors quarantine the namespace (EXEC has no rollback).
+			if s.quarantined.Load() {
+				return ErrIndexSchema
+			}
+			commands, err := tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
 				if next == nil {
 					for _, set := range []string{"unresolved", "pending", "held", "intent-index"} {
 						p.SRem(ctx, s.key(set), id)
@@ -429,6 +425,7 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 				p.Set(ctx, s.rowKey(id), encoded, 0)
 				return nil
 			})
+			err = s.checkedExec(ctx, commands, err)
 			if err == nil {
 				committed = next
 			}
@@ -503,7 +500,7 @@ func (s *DurableStore) occurrenceIndexes(row *DurableOccurrence) []occurrenceInd
 
 // repairIndexes reads membership in one pipeline. If everything matches it
 // sends no MULTI/EXEC at all. An index-only repair WATCHes the occurrence as well
-// as the indexes, so a concurrent lifecycle update always invalidates stale repair.
+// as the schema fence, so a concurrent lifecycle update invalidates stale repair.
 func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id string, row *DurableOccurrence) error {
 	indexes := s.occurrenceIndexes(row)
 	scores := make(map[string]*redis.FloatCmd)
@@ -527,14 +524,14 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		return nil
 	})
 	if err != nil && !errors.Is(err, redis.Nil) {
-		return err
+		return s.readError(ctx, err)
 	}
 	var changes []occurrenceIndex
 	for _, index := range indexes {
 		if index.sorted {
 			score, err := scores[index.key].Result()
 			if err != nil && !errors.Is(err, redis.Nil) {
-				return err
+				return s.readError(ctx, err)
 			}
 			present := err == nil
 			if present != index.present || (present && score != index.score) {
@@ -543,7 +540,7 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		} else {
 			present, err := members[index.key].Result()
 			if err != nil {
-				return err
+				return s.readError(ctx, err)
 			}
 			if present != index.present {
 				changes = append(changes, index)
@@ -554,7 +551,7 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 	if tokenExists != nil {
 		n, err := tokenExists.Result()
 		if err != nil {
-			return err
+			return s.readError(ctx, err)
 		}
 		removeToken = n != 0
 	}
@@ -562,14 +559,17 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 	if deliveryTokenExists != nil {
 		n, err := deliveryTokenExists.Result()
 		if err != nil {
-			return err
+			return s.readError(ctx, err)
 		}
 		removeDeliveryToken = n != 0
 	}
 	if len(changes) == 0 && !removeToken && !removeDeliveryToken {
 		return nil
 	}
-	_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+	if s.quarantined.Load() {
+		return ErrIndexSchema
+	}
+	commands, err := tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
 		for _, index := range changes {
 			if index.sorted {
 				if index.present {
@@ -589,7 +589,7 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		}
 		return nil
 	})
-	return err
+	return s.checkedExec(ctx, commands, err)
 }
 
 func queueScore(ctx context.Context, p redis.Pipeliner, key, id string, at time.Time) {
@@ -610,11 +610,15 @@ func setMember(ctx context.Context, p redis.Pipeliner, key, id string, include b
 
 func (s *DurableStore) due(ctx context.Context, index string, limit int) (ids []string, err error) {
 	defer func() { s.record("due", err) }()
+	if err := s.checkSchema(ctx, s.client); err != nil {
+		return nil, err
+	}
 	now, err := s.client.Time(ctx).Result()
 	if err != nil {
 		return nil, err
 	}
-	return s.client.ZRangeArgs(ctx, redis.ZRangeArgs{Key: s.key(index), Start: "-inf", Stop: now.UnixMilli(), ByScore: true, Count: int64(limit)}).Result()
+	ids, err = s.client.ZRangeArgs(ctx, redis.ZRangeArgs{Key: s.key(index), Start: "-inf", Stop: now.UnixMilli(), ByScore: true, Count: int64(limit)}).Result()
+	return ids, s.readError(ctx, err)
 }
 
 func (s *DurableStore) deliveryClaimKey(id string) string { return s.key("delivery-claim:" + id) }

@@ -20,13 +20,14 @@ import (
 
 // Count actual client commands and optimistic conflicts, not timing estimates.
 // Hooks are installed only in benchmarks, never in production.
-type benchmarkCommands struct{ types, attempts, retries, pipelines, records atomic.Int64 }
+type benchmarkCommands struct{ types, attempts, retries, pipelines, records, commands atomic.Int64 }
 
 func (h *benchmarkCommands) DialHook(next redis.DialHook) redis.DialHook {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) { return next(ctx, network, addr) }
 }
 func (h *benchmarkCommands) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
+		h.commands.Add(1)
 		if cmd.Name() == "type" {
 			h.types.Add(1)
 		}
@@ -39,6 +40,7 @@ func (h *benchmarkCommands) ProcessHook(next redis.ProcessHook) redis.ProcessHoo
 func (h *benchmarkCommands) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return func(ctx context.Context, cmds []redis.Cmder) error {
 		h.pipelines.Add(1)
+		h.commands.Add(int64(len(cmds)))
 		for _, cmd := range cmds {
 			if cmd.Name() == "type" {
 				h.types.Add(1)
@@ -64,9 +66,11 @@ func (h *benchmarkCommands) reset() {
 	h.retries.Store(0)
 	h.pipelines.Store(0)
 	h.records.Store(0)
+	h.commands.Store(0)
 }
 func (h *benchmarkCommands) report(b *testing.B) {
 	n := float64(b.N)
+	b.ReportMetric(float64(h.commands.Load())/n, "commands/op")
 	b.ReportMetric(float64(h.types.Load())/n, "TYPE/op")
 	b.ReportMetric(float64(h.attempts.Load())/n, "WATCH/op")
 	b.ReportMetric(float64(h.retries.Load())/n, "retries/op")
