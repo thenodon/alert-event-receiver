@@ -7,6 +7,7 @@ import (
 
 type metrics struct {
 	registry              *prometheus.Registry
+	delivery              *deliveryMetrics
 	requests              *prometheus.CounterVec
 	latency               *prometheus.HistogramVec
 	alerts                *prometheus.CounterVec
@@ -41,7 +42,7 @@ func newMetrics(cfg Config) *metrics {
 			Name: "sla_proxy_alerts_received_total", Help: "Alerts in fully validated webhook batches, including selected and skipped alerts, repeats and stale notifications.",
 		}, []string{"status"}),
 		selected: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sla_proxy_alerts_selected_total", Help: "Observe-only selections by configured policy pair and alert status; not policy eligibility, persistence or delivery.",
+			Name: "sla_proxy_alerts_selected_total", Help: "Notification selections by configured policy pair and alert status; not policy eligibility, persistence or delivery.",
 		}, []string{"sla_label", "sla_value", "status"}),
 		skipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "sla_proxy_alerts_skipped_total", Help: "Valid alerts skipped for missing SLA selection labels or unknown SLA identifiers.",
@@ -90,5 +91,6 @@ func newMetrics(cfg Config) *metrics {
 	for _, reason := range []string{"calendar_error", "unknown_policy", "invalid_evaluation_time", "cancelled", "evaluation_error"} {
 		m.policyErrors.WithLabelValues(reason)
 	}
+	m.delivery = newDeliveryMetrics(m.registry)
 	return m
 }

@@ -87,6 +87,9 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 			if row == nil {
 				return nil, nil
 			}
+			if row.outstandingDelivery() {
+				return row, nil
+			}
 			if row.DeleteAt != nil && !row.DeleteAt.After(now) {
 				return nil, nil
 			}
@@ -122,6 +125,7 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 			}
 			row.Claim = nil
 			m.syncPolicies(row, now)
+			m.refreshDelivery(row)
 			return row, nil
 		})
 		if err != nil && !errors.Is(err, ErrClaimBusy) {
@@ -169,13 +173,13 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 // including future scores and ready intents with no scheduling deadline. Rotate
 // indexes and buffer oversized SCAN pages to bound work per maintenance tick.
 func (m *DurableManager) reconcileIndex(ctx context.Context) error {
-	indexes := []string{"unresolved", "pending", "held", "intent-index", "due", "retention"}
+	indexes := []string{"unresolved", "pending", "held", "intent-index", "delivery-ready", "delivery-claimed", "delivery-held", "due", "retention", "delivery-due"}
 	index := indexes[m.indexPosition]
 	if len(m.indexPending) == 0 {
 		var page []string
 		var cursor uint64
 		var err error
-		if m.indexPosition < 4 {
+		if m.indexPosition < 7 {
 			page, cursor, err = m.store.client.SScan(ctx, m.store.key(index), m.indexCursor, "*", int64(m.cfg.Durable.Scheduler.BatchSize)).Result()
 		} else {
 			var scored []string

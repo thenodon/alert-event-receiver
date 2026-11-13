@@ -33,18 +33,26 @@ type Notification struct {
 }
 
 type DeliveryIntent struct {
-	ID                     string    `json:"id"`
-	Action                 string    `json:"action"`
-	PayloadReference       string    `json:"payload_reference"`
-	IdempotencyKey         string    `json:"idempotency_key"`
-	Ready                  bool      `json:"ready"`
-	RequiresFiringDelivery bool      `json:"requires_firing_delivery"`
-	Canceled               bool      `json:"canceled"`
-	CreatedAt              time.Time `json:"created_at"`
+	ID                     string           `json:"id"`
+	Action                 string           `json:"action"`
+	PayloadReference       string           `json:"payload_reference"`
+	IdempotencyKey         string           `json:"idempotency_key"`
+	Ready                  bool             `json:"ready"`
+	RequiresFiringDelivery bool             `json:"requires_firing_delivery"`
+	Canceled               bool             `json:"canceled"`
+	CreatedAt              time.Time        `json:"created_at"`
+	Attempts               uint64           `json:"attempts,omitempty"`
+	AuthorizedAt           *time.Time       `json:"authorized_at,omitempty"`
+	NextAttemptAt          time.Time        `json:"next_attempt_at,omitempty"`
+	PermanentFailure       bool             `json:"permanent_failure,omitempty"`
+	LastFailure            string           `json:"last_failure,omitempty"`
+	Payload                *Notification    `json:"payload,omitempty"`
+	Receipt                *DeliveryReceipt `json:"receipt,omitempty"`
 }
 
 type DurableBinding struct {
 	ID               string                     `json:"id"`
+	SinkType         string                     `json:"sink_type,omitempty"`
 	Policy           PolicyRef                  `json:"policy"`
 	SinkID           string                     `json:"sink_id"`
 	PolicyVersion    string                     `json:"policy_version"`
@@ -55,7 +63,7 @@ type DurableBinding struct {
 	NextEvaluationAt time.Time                  `json:"next_evaluation_at"`
 	RetryCount       int                        `json:"retry_count"`
 	Intents          map[string]*DeliveryIntent `json:"intents"`
-	// Reserved receipt evidence for Phase 4. Phase 3 never populates it.
+	// Successful firing evidence; populated only after the sink succeeds.
 	FiringDeliveredAt *time.Time `json:"firing_delivered_at,omitempty"`
 }
 
@@ -91,6 +99,8 @@ type DurableOccurrence struct {
 	DeleteAt             *time.Time                 `json:"delete_at,omitempty"`
 	Compacted            bool                       `json:"compacted"`
 	ResolutionConflict   bool                       `json:"resolution_conflict"`
+	DeliveryClaim        *DeliveryClaim             `json:"delivery_claim,omitempty"`
+	DeliveryFence        uint64                     `json:"delivery_fence,omitempty"`
 }
 
 func tupleID(values ...string) string {
@@ -118,7 +128,7 @@ func (o *DurableOccurrence) dueAt() time.Time {
 	return due
 }
 func (o *DurableOccurrence) retentionAt() time.Time {
-	if o.CompletedAt == nil {
+	if o.CompletedAt == nil || o.outstandingDelivery() {
 		return time.Time{}
 	}
 	if !o.Compacted {

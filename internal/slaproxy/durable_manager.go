@@ -63,7 +63,7 @@ func (m *DurableManager) accept(ctx context.Context, a models.Alert, payload mod
 	var before *DurableOccurrence
 	row, err := m.store.update(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
 		before = transitionSnapshot(row)
-		if row != nil && row.DeleteAt != nil && !row.DeleteAt.After(now) {
+		if row != nil && row.DeleteAt != nil && !row.DeleteAt.After(now) && !row.outstandingDelivery() {
 			row = nil
 		}
 		if row == nil {
@@ -136,8 +136,8 @@ func (m *DurableManager) advance(row *DurableOccurrence, now time.Time) {
 		if row.Lifecycle == LifecycleResolved {
 			a := models.Alert{Status: "resolved", StartsAt: row.StartsAt, EndsAt: *row.EndsAt}
 			b.Eligibility, _ = alertEligibility(a, b.Calendar, now)
-			// Phase 4 must decide retroactive firing. Unconsumed firing intent
-			// becomes non-actionable once a resolution is known.
+			// Default to canceling unsent firing. refreshDelivery preserves
+			// already-authorized recovery and successful receipt evidence.
 			if i := b.Intents["firing"]; i != nil {
 				i.Ready, i.Canceled = false, true
 			}
@@ -176,6 +176,7 @@ func (m *DurableManager) advance(row *DurableOccurrence, now time.Time) {
 		i.Ready, i.Canceled = true, false
 		b.Delivery = PendingDelivery
 	}
+	m.refreshDelivery(row)
 }
 
 func (m *DurableManager) syncPolicies(row *DurableOccurrence, now time.Time) {

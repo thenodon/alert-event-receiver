@@ -72,18 +72,6 @@ type Scheduler interface {
 	Run(context.Context) error
 }
 
-// DeliveryReceipt describes sink acceptance only, never workflow completion.
-type DeliveryReceipt struct {
-	Accepted bool
-}
-
-// DownstreamDelivery preserves the original webhook metadata and alerts. Its
-// payload, idempotency, durable intent and ordering contracts need Phase 4 review.
-// This interface has no implementation and is never invoked in Phases 1 or 2.
-type DownstreamDelivery interface {
-	Deliver(ctx context.Context, sinkID, idempotencyKey string, payload models.WebhookPayload) (DeliveryReceipt, error)
-}
-
 // Enrichment is separate metadata; it must not replace original labels/identity.
 type Enrichment map[string]string
 

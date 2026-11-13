@@ -27,11 +27,13 @@ type policyRegistry struct {
 // schedule and intents live in one authoritative JSON document. Secondary indexes
 // are transactionally maintained and can be rebuilt from those documents.
 type DurableStore struct {
-	client   *redis.Client
-	cfg      DurableConfig
-	prefix   string
-	registry policyRegistry
-	metrics  *metrics
+	client          *redis.Client
+	cfg             DurableConfig
+	prefix          string
+	registry        policyRegistry
+	metrics         *metrics
+	deliveryEnabled bool
+	sinkType        string
 }
 
 func newDurableStore(client *redis.Client, config Config, engine *CalendarEngine, metrics *metrics) *DurableStore {
@@ -48,7 +50,13 @@ func newDurableStore(client *redis.Client, config Config, engine *CalendarEngine
 		Versions       map[string]string
 		SelectionOrder []string
 	}{versions, order})
-	return &DurableStore{client: client, cfg: cfg, prefix: cfg.Valkey.Namespace + ":{sla}:", registry: policyRegistry{cfg.PolicyEpoch, tupleID(string(encoded), cfg.SinkID)}, metrics: metrics}
+	digest := tupleID(string(encoded), cfg.SinkID)
+	// Activating the delivery record format fences older Phase 3 processes. The
+	// disabled digest stays identical to Phase 3 for existing deployments.
+	if config.Delivery.Enabled {
+		digest = tupleID(digest, "delivery-v1", config.Delivery.Sink.Type)
+	}
+	return &DurableStore{client: client, cfg: cfg, deliveryEnabled: config.Delivery.Enabled, sinkType: config.Delivery.Sink.Type, prefix: cfg.Valkey.Namespace + ":{sla}:", registry: policyRegistry{cfg.PolicyEpoch, digest}, metrics: metrics}
 }
 
 func (s *DurableStore) key(suffix string) string  { return s.prefix + suffix }
@@ -66,6 +74,15 @@ func (s *DurableStore) health(ctx context.Context) error {
 	}
 	if registry != s.registry {
 		return ErrPolicyEpoch
+	}
+	if s.deliveryEnabled {
+		kind, err := s.client.Get(ctx, s.destinationKey()).Result()
+		if err != nil {
+			return err
+		}
+		if kind != s.sinkType {
+			return ErrPolicyEpoch
+		}
 	}
 	return nil
 }
@@ -143,6 +160,12 @@ func decodeOccurrence(data []byte, id string) (*DurableOccurrence, error) {
 		(row.Lifecycle == LifecycleResolved && (row.EndsAt == nil || row.CompletedAt == nil || row.CompactAt == nil || row.DeleteAt == nil)) {
 		return nil, fmt.Errorf("corrupt occurrence %s", id)
 	}
+	if c := row.DeliveryClaim; c != nil {
+		b := row.Bindings[c.BindingID]
+		if c.Token == "" || c.Fence == 0 || c.Until.IsZero() || b == nil || b.Intents[c.Action] == nil || b.Intents[c.Action].ID != c.IntentID {
+			return nil, fmt.Errorf("corrupt delivery claim")
+		}
+	}
 	for key, b := range row.Bindings {
 		if b == nil || b.ID != key || key != bindingKeyID(id, b.Policy, b.SinkID) || b.Intents == nil || b.PolicyVersion == "" || b.Calendar.PolicyVersion != b.PolicyVersion ||
 			(!b.Calendar.NextEvaluationAt.IsZero() && b.Calendar.NextEvaluationAt.Before(row.StartsAt)) {
@@ -158,9 +181,22 @@ func decodeOccurrence(data []byte, id string) (*DurableOccurrence, error) {
 		default:
 			return nil, fmt.Errorf("invalid durable delivery status")
 		}
-		for _, intent := range b.Intents {
+		for action, intent := range b.Intents {
 			if intent == nil {
 				return nil, fmt.Errorf("invalid delivery intent")
+			}
+			if b.SinkType != "" {
+				if (action != "firing" && action != "resolved") || intent.Action != action || intent.ID != tupleID(row.ID, b.ID, action) {
+					return nil, fmt.Errorf("corrupt delivery identity")
+				}
+				if intent.AuthorizedAt != nil && ((intent.Payload == nil && intent.Receipt == nil) || intent.Attempts == 0) {
+					return nil, fmt.Errorf("corrupt send authorization")
+				}
+				if r := intent.Receipt; r != nil {
+					if r.IntentID != intent.ID || r.SinkID != b.SinkID || r.DeliveredAt.IsZero() || r.Status != Delivered || r.Attempts == 0 {
+						return nil, fmt.Errorf("corrupt delivery receipt")
+					}
+				}
 			}
 		}
 	}
@@ -174,19 +210,24 @@ func (s *DurableStore) update(ctx context.Context, id string, mutate func(*Durab
 }
 
 func (s *DurableStore) updateClaim(ctx context.Context, id string, required *SchedulerClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (*DurableOccurrence, error) {
-	return s.updateRecord(ctx, id, required, mutate, false)
+	return s.updateRecord(ctx, id, required, nil, mutate, false)
 }
 
 // reconcile distinguishes an occurrence change from index-only repair. An
 // unchanged record retains its exact version, timestamps and claim/token TTL.
 func (s *DurableStore) reconcile(ctx context.Context, id string, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (*DurableOccurrence, error) {
-	return s.updateRecord(ctx, id, nil, mutate, true)
+	return s.updateRecord(ctx, id, nil, nil, mutate, true)
 }
 
-func (s *DurableStore) updateRecord(ctx context.Context, id string, required *SchedulerClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error), reconcile bool) (committed *DurableOccurrence, err error) {
+func (s *DurableStore) updateRecord(ctx context.Context, id string, required *SchedulerClaim, delivery *DeliveryClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error), reconcile bool) (committed *DurableOccurrence, err error) {
 	defer func() { s.record("update", err) }()
 	types := map[string]string{s.rowKey(id): "string", s.claimKey(id): "string", s.key("policies"): "string",
 		s.key("due"): "zset", s.key("retention"): "zset", s.key("unresolved"): "set", s.key("pending"): "set", s.key("held"): "set", s.key("intent-index"): "set"}
+	if s.deliveryEnabled {
+		for key, kind := range s.deliveryKeyTypes(id) {
+			types[key] = kind
+		}
+	}
 	keys := make([]string, 0, len(types))
 	for key := range types {
 		keys = append(keys, key)
@@ -236,6 +277,30 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 					return err
 				}
 			}
+			deliveryKeys := s.deliveryEnabled || old.hasDelivery()
+			if deliveryKeys && !s.deliveryEnabled {
+				for key, kind := range s.deliveryKeyTypes(id) {
+					if err := tx.Watch(ctx, key).Err(); err != nil {
+						return err
+					}
+					actual, err := tx.Type(ctx, key).Result()
+					if err != nil {
+						return err
+					}
+					if actual != "none" && actual != kind {
+						return fmt.Errorf("invalid delivery index type")
+					}
+				}
+			}
+			if s.deliveryEnabled {
+				kind, err := tx.Get(ctx, s.destinationKey()).Result()
+				if err != nil {
+					return err
+				}
+				if kind != s.sinkType {
+					return ErrPolicyEpoch
+				}
+			}
 			now, err := tx.Time(ctx).Result()
 			if err != nil {
 				return err
@@ -246,6 +311,15 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 					return err
 				}
 				if old == nil || old.Claim == nil || token != required.Token || old.Claim.Token != required.Token || old.Claim.Fence != required.Fence || old.Version != required.Version || !old.Claim.Until.After(now) {
+					return ErrFenced
+				}
+			}
+			if delivery != nil {
+				token, err := tx.Get(ctx, s.deliveryClaimKey(id)).Result()
+				if err != nil && err != redis.Nil {
+					return err
+				}
+				if old == nil || old.DeliveryClaim == nil || token != delivery.Token || old.DeliveryClaim.Token != delivery.Token || old.DeliveryClaim.Fence != delivery.Fence || old.DeliveryClaim.IntentID != delivery.IntentID || !old.DeliveryClaim.Until.After(now) {
 					return ErrFenced
 				}
 			}
@@ -309,9 +383,27 @@ func (s *DurableStore) updateRecord(ctx context.Context, id string, required *Sc
 					}
 					p.ZRem(ctx, s.key("due"), id)
 					p.ZRem(ctx, s.key("retention"), id)
+					if deliveryKeys {
+						p.Del(ctx, s.deliveryClaimKey(id))
+						p.ZRem(ctx, s.key("delivery-due"), id)
+						p.SRem(ctx, s.key("delivery-ready"), id)
+						p.SRem(ctx, s.key("delivery-claimed"), id)
+						p.SRem(ctx, s.key("delivery-held"), id)
+					}
 					p.Del(ctx, s.claimKey(id))
 					p.Del(ctx, s.rowKey(id))
 					return nil
+				}
+				if deliveryKeys {
+					queueScore(ctx, p, s.key("delivery-due"), id, next.deliveryDueAt())
+					setMember(ctx, p, s.key("delivery-ready"), id, next.DeliveryClaim == nil && !next.deliveryDueAt().IsZero())
+					setMember(ctx, p, s.key("delivery-claimed"), id, next.DeliveryClaim != nil)
+					setMember(ctx, p, s.key("delivery-held"), id, next.deliveryHeld())
+					if next.DeliveryClaim == nil {
+						p.Del(ctx, s.deliveryClaimKey(id))
+					} else {
+						p.SetArgs(ctx, s.deliveryClaimKey(id), next.DeliveryClaim.Token, redis.SetArgs{ExpireAt: next.DeliveryClaim.Until})
+					}
 				}
 				queueScore(ctx, p, s.key("due"), id, next.dueAt())
 				queueScore(ctx, p, s.key("retention"), id, next.retentionAt())
@@ -376,6 +468,19 @@ func (s *DurableStore) occurrenceIndexes(row *DurableOccurrence) []occurrenceInd
 		{key: s.key("due"), sorted: true}, {key: s.key("retention"), sorted: true},
 		{key: s.key("unresolved")}, {key: s.key("pending")}, {key: s.key("held")}, {key: s.key("intent-index")},
 	}
+	if s.deliveryEnabled || row.hasDelivery() {
+		indexes = append(indexes, occurrenceIndex{key: s.key("delivery-due"), sorted: true}, occurrenceIndex{key: s.key("delivery-ready")}, occurrenceIndex{key: s.key("delivery-claimed")}, occurrenceIndex{key: s.key("delivery-held")})
+		if row != nil {
+			at := row.deliveryDueAt()
+			indexes[6].present = !at.IsZero()
+			if !at.IsZero() {
+				indexes[6].score = deadlineScore(at)
+			}
+			indexes[7].present = row.DeliveryClaim == nil && !at.IsZero()
+			indexes[8].present = row.DeliveryClaim != nil
+			indexes[9].present = row.deliveryHeld()
+		}
+	}
 	if row == nil {
 		return indexes
 	}
@@ -404,6 +509,7 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 	scores := make(map[string]*redis.FloatCmd)
 	members := make(map[string]*redis.BoolCmd)
 	var tokenExists *redis.IntCmd
+	var deliveryTokenExists *redis.IntCmd
 	_, err := tx.Pipelined(ctx, func(p redis.Pipeliner) error {
 		for _, index := range indexes {
 			if index.sorted {
@@ -414,6 +520,9 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		}
 		if row == nil || row.Claim == nil {
 			tokenExists = p.Exists(ctx, s.claimKey(id))
+		}
+		if (s.deliveryEnabled || row.hasDelivery()) && (row == nil || row.DeliveryClaim == nil) {
+			deliveryTokenExists = p.Exists(ctx, s.deliveryClaimKey(id))
 		}
 		return nil
 	})
@@ -449,7 +558,15 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		}
 		removeToken = n != 0
 	}
-	if len(changes) == 0 && !removeToken {
+	removeDeliveryToken := false
+	if deliveryTokenExists != nil {
+		n, err := deliveryTokenExists.Result()
+		if err != nil {
+			return err
+		}
+		removeDeliveryToken = n != 0
+	}
+	if len(changes) == 0 && !removeToken && !removeDeliveryToken {
 		return nil
 	}
 	_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
@@ -466,6 +583,9 @@ func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id strin
 		}
 		if removeToken {
 			p.Del(ctx, s.claimKey(id))
+		}
+		if removeDeliveryToken {
+			p.Del(ctx, s.deliveryClaimKey(id))
 		}
 		return nil
 	})
@@ -495,4 +615,39 @@ func (s *DurableStore) due(ctx context.Context, index string, limit int) (ids []
 		return nil, err
 	}
 	return s.client.ZRangeArgs(ctx, redis.ZRangeArgs{Key: s.key(index), Start: "-inf", Stop: now.UnixMilli(), ByScore: true, Count: int64(limit)}).Result()
+}
+
+func (s *DurableStore) deliveryClaimKey(id string) string { return s.key("delivery-claim:" + id) }
+func (s *DurableStore) destinationKey() string            { return s.key("destination:" + tupleID(s.cfg.SinkID)) }
+func (s *DurableStore) deliveryKeyTypes(id string) map[string]string {
+	return map[string]string{s.deliveryClaimKey(id): "string", s.destinationKey(): "string", s.key("delivery-due"): "zset", s.key("delivery-ready"): "set", s.key("delivery-claimed"): "set", s.key("delivery-held"): "set"}
+}
+func (s *DurableStore) updateDelivery(ctx context.Context, id string, claim *DeliveryClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (*DurableOccurrence, error) {
+	return s.updateRecord(ctx, id, nil, claim, mutate, false)
+}
+
+// A destination's implementation is an immutable pin, separate from policy
+// epochs. A future sink change needs an explicit reviewed migration.
+func (s *DurableStore) activateSink(ctx context.Context) error {
+	key := s.destinationKey()
+	for attempt := 0; attempt < 32; attempt++ {
+		err := s.client.Watch(ctx, func(tx *redis.Tx) error {
+			kind, err := tx.Get(ctx, key).Result()
+			if err != nil && err != redis.Nil {
+				return err
+			}
+			if err == nil {
+				if kind != s.sinkType {
+					return fmt.Errorf("logical sink already pinned to another implementation; migration required")
+				}
+				return nil
+			}
+			_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error { p.Set(ctx, key, s.sinkType, 0); return nil })
+			return err
+		}, key)
+		if err != redis.TxFailedErr {
+			return err
+		}
+	}
+	return fmt.Errorf("sink activation contention")
 }

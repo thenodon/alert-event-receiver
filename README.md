@@ -245,13 +245,15 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
-## Alert SLA Proxy (Phases 2–3)
+## Alert SLA Proxy (Phases 2–4A)
 
 The separate `alert-sla-proxy` selects label-based SLA policies and evaluates
 weekly IANA schedules, holidays and active-interval overlap. By default it is
 stateless `observe_only`. Opt-in Phase 3 persists occurrences in Valkey, schedules
 pending alerts, handles out-of-order resolutions and prepares durable intent.
-It never forwards notifications or marks them delivered.
+With delivery disabled it never invokes a sink. Opt-in Phase 4A adds a real
+logging destination with durable receipts, retries and at-least-once attempts;
+HTTP delivery is not implemented.
 
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
@@ -259,6 +261,8 @@ go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
 # Or durable lifecycle/scheduling, with a configured persistent Valkey:
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-durable.yaml
+# Or enable the real logging sink (increase the policy epoch for an existing namespace):
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-log.yaml
 ```
 
 Phase 3 trusts Alertmanager's webhook lifecycle. If an SLA opportunity arrives
@@ -559,7 +563,7 @@ inspection and idempotency troubleshooting.
 
 ## Current limitations and roadmap
 
-The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation and opt-in durable SLA scheduling; downstream delivery remains deferred.
+The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation, opt-in durable SLA scheduling and a real logging delivery sink. HTTP delivery remains deferred.
 
 v0.2.0 focuses on best-effort delivery observability. It adds no persistent queue, retries, replay, policies, or sinks.
 

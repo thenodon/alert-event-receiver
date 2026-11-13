@@ -17,13 +17,14 @@ import (
 
 // Config is independent of the event receiver's environment configuration.
 type Config struct {
-	ListenAddress         string        `yaml:"listen_address"`
-	WebhookPath           string        `yaml:"webhook_path"`
-	MaxBodyBytes          int64         `yaml:"max_body_bytes"`
-	ShutdownTimeout       time.Duration `yaml:"shutdown_timeout"`
-	EvaluationHorizonDays int           `yaml:"evaluation_horizon_days"`
-	SLADefinitions        []Definition  `yaml:"sla_definitions"`
-	Durable               DurableConfig `yaml:"durable"`
+	ListenAddress         string         `yaml:"listen_address"`
+	WebhookPath           string         `yaml:"webhook_path"`
+	MaxBodyBytes          int64          `yaml:"max_body_bytes"`
+	ShutdownTimeout       time.Duration  `yaml:"shutdown_timeout"`
+	EvaluationHorizonDays int            `yaml:"evaluation_horizon_days"`
+	SLADefinitions        []Definition   `yaml:"sla_definitions"`
+	Durable               DurableConfig  `yaml:"durable"`
+	Delivery              DeliveryConfig `yaml:"delivery"`
 }
 
 // Definition owns its policy namespace. SLA names may repeat across definitions.
@@ -50,7 +51,7 @@ func LoadConfig(r io.Reader) (Config, error) {
 	cfg := Config{
 		ListenAddress: ":9012", WebhookPath: "/webhook",
 		MaxBodyBytes: 1 << 20, ShutdownTimeout: 10 * time.Second, EvaluationHorizonDays: 370,
-		Durable: defaultDurableConfig(),
+		Durable: defaultDurableConfig(), Delivery: defaultDeliveryConfig(),
 	}
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
@@ -70,6 +71,9 @@ func LoadConfig(r io.Reader) (Config, error) {
 var labelName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 func (c Config) Validate() error {
+	if err := c.Delivery.Validate(c.Durable); err != nil {
+		return err
+	}
 	if err := c.Durable.Validate(); err != nil {
 		return err
 	}
@@ -242,6 +246,55 @@ func (c DurableConfig) Validate() error {
 	}
 	if c.Retention.CompletedPayload <= 0 || c.Retention.Tombstone <= c.Retention.CompletedPayload || c.Retention.Tombstone > 10*365*24*time.Hour {
 		return fmt.Errorf("durable retention requires 0 < completed_payload < tombstone <= 10 years")
+	}
+	return nil
+}
+
+// DeliveryConfig enables a concrete sink independently of durable acceptance.
+type DeliveryConfig struct {
+	Enabled bool `yaml:"enabled"`
+	Sink    struct {
+		Type string `yaml:"type"`
+	} `yaml:"sink"`
+	Dispatcher struct {
+		PollInterval    time.Duration `yaml:"poll_interval"`
+		Workers         int           `yaml:"workers"`
+		BatchSize       int           `yaml:"batch_size"`
+		ClaimLease      time.Duration `yaml:"claim_lease"`
+		DeliveryTimeout time.Duration `yaml:"delivery_timeout"`
+		RetryInitial    time.Duration `yaml:"retry_initial"`
+		RetryMax        time.Duration `yaml:"retry_max"`
+	} `yaml:"dispatcher"`
+}
+
+func defaultDeliveryConfig() DeliveryConfig {
+	var c DeliveryConfig
+	c.Sink.Type = "log"
+	c.Dispatcher.PollInterval = time.Second
+	c.Dispatcher.Workers, c.Dispatcher.BatchSize = 4, 100
+	c.Dispatcher.ClaimLease, c.Dispatcher.DeliveryTimeout = 30*time.Second, 10*time.Second
+	c.Dispatcher.RetryInitial, c.Dispatcher.RetryMax = 5*time.Second, 5*time.Minute
+	return c
+}
+func (c DeliveryConfig) Validate(d DurableConfig) error {
+	if !c.Enabled {
+		return nil
+	}
+	if !d.Enabled {
+		return fmt.Errorf("delivery requires durable.enabled")
+	}
+	if c.Sink.Type != "log" {
+		return fmt.Errorf("delivery.sink.type must be log")
+	}
+	x := c.Dispatcher
+	if x.PollInterval < 10*time.Millisecond || x.PollInterval > time.Minute || x.Workers < 1 || x.Workers > 64 || x.BatchSize < 1 || x.BatchSize > 1000 {
+		return fmt.Errorf("invalid delivery dispatcher poll_interval/workers/batch_size")
+	}
+	if x.DeliveryTimeout <= 0 || x.DeliveryTimeout > time.Minute || x.ClaimLease < x.DeliveryTimeout+3*d.Scheduler.OperationTimeout || x.ClaimLease > 10*time.Minute {
+		return fmt.Errorf("delivery claim_lease must cover delivery_timeout + 3*durable scheduler operation_timeout and be <= 10m")
+	}
+	if x.RetryInitial < x.PollInterval || x.RetryMax < x.RetryInitial || x.RetryMax > time.Hour {
+		return fmt.Errorf("invalid delivery retry durations")
 	}
 	return nil
 }

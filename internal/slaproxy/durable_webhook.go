@@ -10,17 +10,18 @@ import (
 )
 
 type DurableObservation struct {
-	SchemaVersion  int              `json:"schema_version"`
-	Mode           string           `json:"mode"`
-	Persisted      bool             `json:"persisted"`
-	Forwarded      bool             `json:"forwarded"`
-	Received       int              `json:"received"`
-	Selected       int              `json:"selected"`
-	Skipped        int              `json:"skipped"`
-	PersistedCount int              `json:"persisted_count"`
-	FailedCount    int              `json:"failed_count"`
-	EvaluatedAt    time.Time        `json:"evaluated_at"`
-	Occurrences    []DurableSummary `json:"occurrences"`
+	DeliveryEnabled bool             `json:"delivery_enabled,omitempty"`
+	SchemaVersion   int              `json:"schema_version"`
+	Mode            string           `json:"mode"`
+	Persisted       bool             `json:"persisted"`
+	Forwarded       bool             `json:"forwarded"`
+	Received        int              `json:"received"`
+	Selected        int              `json:"selected"`
+	Skipped         int              `json:"skipped"`
+	PersistedCount  int              `json:"persisted_count"`
+	FailedCount     int              `json:"failed_count"`
+	EvaluatedAt     time.Time        `json:"evaluated_at"`
+	Occurrences     []DurableSummary `json:"occurrences"`
 }
 
 type DurableSummary struct {
@@ -48,7 +49,7 @@ func (s *Service) durableWebhook(w http.ResponseWriter, r *http.Request, payload
 	// consume a fresh timeout beyond the HTTP response deadline.
 	batchCtx, stopBatch := context.WithTimeout(r.Context(), s.cfg.Durable.Scheduler.OperationTimeout)
 	defer stopBatch()
-	result := DurableObservation{SchemaVersion: 3, Mode: s.mode(), Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Occurrences: []DurableSummary{}}
+	result := DurableObservation{DeliveryEnabled: s.cfg.Delivery.Enabled, SchemaVersion: 3, Mode: s.mode(), Received: len(payload.Alerts), EvaluatedAt: s.now().UTC(), Occurrences: []DurableSummary{}}
 	for _, a := range payload.Alerts {
 		s.metrics.alerts.WithLabelValues(a.Status).Inc()
 		ctx, cancel := context.WithTimeout(batchCtx, s.cfg.Durable.Scheduler.OperationTimeout)

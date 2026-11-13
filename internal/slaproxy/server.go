@@ -18,19 +18,20 @@ import (
 )
 
 // Service owns an independent configuration, registry and HTTP lifecycle.
-// Receiver processing/telemetry are independent. Valkey is used only in Phase 3.
+// Receiver processing/telemetry are independent. Valkey is used only when durable processing is enabled.
 type Service struct {
-	cfg       Config
-	logger    *slog.Logger
-	metrics   *metrics
-	enricher  NoopEnricher
-	evaluator PolicyEvaluator
-	now       func() time.Time
-	ready     atomic.Bool
-	handler   http.Handler
-	durable   *DurableManager
-	closeOnce sync.Once
-	closeErr  error
+	cfg        Config
+	logger     *slog.Logger
+	metrics    *metrics
+	enricher   NoopEnricher
+	evaluator  PolicyEvaluator
+	now        func() time.Time
+	ready      atomic.Bool
+	handler    http.Handler
+	durable    *DurableManager
+	dispatcher *DeliveryDispatcher
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func New(cfg Config, logger *slog.Logger) (*Service, error) {
@@ -67,6 +68,9 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		err := client.Ping(ctx).Err()
 		if err == nil {
 			err = store.activate(ctx)
+			if err == nil && cfg.Delivery.Enabled {
+				err = store.activateSink(ctx)
+			}
 		}
 		cancel()
 		if err != nil {
@@ -74,6 +78,9 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 			return nil, fmt.Errorf("initialize SLA state store: %w", err)
 		}
 		s.durable = &DurableManager{store: store, engine: engine, cfg: cfg, logger: logger}
+		if cfg.Delivery.Enabled {
+			s.dispatcher = &DeliveryDispatcher{manager: s.durable, sink: LogSink{Handler: logger.Handler()}, metrics: s.metrics.delivery}
+		}
 	}
 	s.ready.Store(true)
 	mux := http.NewServeMux()
@@ -105,6 +112,9 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 func (s *Service) Handler() http.Handler { return s.handler }
 
 func (s *Service) mode() string {
+	if s.cfg.Delivery.Enabled {
+		return "delivery_enabled"
+	}
 	if s.durable != nil {
 		return "durable_state_only"
 	}
@@ -142,14 +152,14 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 		ReadTimeout: 10 * time.Second, WriteTimeout: writeTimeout,
 		IdleTimeout: 60 * time.Second,
 	}
-	s.logger.Info("SLA proxy starting without downstream delivery",
-		"component", "sla_proxy", "mode", s.mode(), "calendar_evaluation", true, "forwarded", false)
+	s.logger.Info("SLA proxy starting",
+		"component", "sla_proxy", "mode", s.mode(), "calendar_evaluation", true, "delivery_enabled", s.cfg.Delivery.Enabled)
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	defer stopRuntime()
 	var runtimeDone chan error
 	if s.durable != nil {
 		runtimeDone = make(chan error, 1)
-		go func() { runtimeDone <- s.durable.Run(runtimeCtx) }()
+		go func() { runtimeDone <- s.runDurable(runtimeCtx) }()
 	}
 	s.logger.Info("starting HTTP server", "component", "http", "operation", "serve", "addr", listener.Addr().String())
 	done := make(chan error, 1)
@@ -197,4 +207,19 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 	}
 	s.logger.Info("HTTP shutdown completed", "component", "http", "operation", "shutdown")
 	return nil
+}
+
+func (s *Service) runDurable(ctx context.Context) error {
+	if s.dispatcher == nil {
+		return s.durable.Run(ctx)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, 2)
+	go func() { done <- s.durable.Run(ctx) }()
+	go func() { done <- s.dispatcher.Run(ctx) }()
+	first := <-done
+	cancel()
+	second := <-done
+	return errors.Join(first, second)
 }
