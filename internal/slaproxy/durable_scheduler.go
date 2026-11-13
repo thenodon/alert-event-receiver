@@ -83,7 +83,7 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 		return err
 	}
 	for _, id := range ids {
-		_, err := m.store.update(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
+		_, err := m.store.reconcile(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
 			if row == nil {
 				return nil, nil
 			}
@@ -113,12 +113,12 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 		if err != nil {
 			return err
 		}
-		after, err := m.store.update(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
+		after, err := m.store.reconcile(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
 			if row == nil {
 				return nil, nil
 			}
 			if row.Claim != nil && row.Claim.Until.After(now) {
-				return nil, ErrClaimBusy
+				return row, nil // Repair indexes without touching the live lease.
 			}
 			row.Claim = nil
 			m.syncPolicies(row, now)
@@ -146,7 +146,7 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) err
 				return err
 			}
 			if row == nil {
-				if _, err := m.store.update(ctx, id, func(*DurableOccurrence, time.Time) (*DurableOccurrence, error) { return nil, nil }); err != nil {
+				if _, err := m.store.reconcile(ctx, id, func(*DurableOccurrence, time.Time) (*DurableOccurrence, error) { return nil, nil }); err != nil {
 					return err
 				}
 			}
@@ -193,7 +193,7 @@ func (m *DurableManager) reconcileIndex(ctx context.Context) error {
 	for _, id := range m.indexPending[:count] {
 		// WATCH handles a concurrent creation after the scan. Never delete a live row
 		// or disturb an active claim merely to remove an orphan index membership.
-		_, err := m.store.update(ctx, id, func(row *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
+		_, err := m.store.reconcile(ctx, id, func(row *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
 			if row != nil {
 				return nil, ErrClaimBusy
 			}

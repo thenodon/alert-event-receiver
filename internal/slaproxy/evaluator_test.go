@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func instant(t *testing.T, text string) time.Time {
+func instant(t testing.TB, text string) time.Time {
 	t.Helper()
 	v, err := time.Parse(time.RFC3339Nano, text)
 	if err != nil {

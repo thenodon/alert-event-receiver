@@ -38,7 +38,7 @@ func testAlert(status string, labels map[string]string) models.Alert {
 	return a
 }
 
-func testPayload(t *testing.T, alerts ...models.Alert) []byte {
+func testPayload(t testing.TB, alerts ...models.Alert) []byte {
 	t.Helper()
 	if alerts == nil {
 		alerts = []models.Alert{}

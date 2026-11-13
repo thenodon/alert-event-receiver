@@ -22,12 +22,12 @@ import (
 )
 
 type valkeyFixture struct {
-	t                    *testing.T
+	t                    testing.TB
 	address, dir, binary string
 	cmd                  *exec.Cmd
 }
 
-func realValkey(t *testing.T) *valkeyFixture {
+func realValkey(t testing.TB) *valkeyFixture {
 	t.Helper()
 	binary := os.Getenv("SLA_PROXY_VALKEY_SERVER")
 	if binary == "" {
@@ -86,7 +86,7 @@ func (f *valkeyFixture) stop() {
 }
 func (f *valkeyFixture) restart() { f.stop(); f.start() }
 
-func integrationConfig(t *testing.T, f *valkeyFixture) Config {
+func integrationConfig(t testing.TB, f *valkeyFixture) Config {
 	c := testConfig(t)
 	c.Durable.Enabled, c.Durable.Valkey.Address = true, f.address
 	c.Durable.Scheduler.PollInterval, c.Durable.Scheduler.ReconcileInterval = 10*time.Millisecond, 100*time.Millisecond
@@ -95,7 +95,7 @@ func integrationConfig(t *testing.T, f *valkeyFixture) Config {
 	c.Durable.Scheduler.Workers, c.Durable.Scheduler.BatchSize = 2, 10
 	return c
 }
-func manager(t *testing.T, cfg Config) *DurableManager {
+func manager(t testing.TB, cfg Config) *DurableManager {
 	t.Helper()
 	s, err := New(cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
@@ -119,7 +119,7 @@ func acceptTest(t *testing.T, m *DurableManager, status, start, end string) *Dur
 func modelsPayload(a models.Alert) models.WebhookPayload {
 	return models.WebhookPayload{Version: "4", Receiver: "sla", Status: a.Status, Alerts: []models.Alert{a}}
 }
-func onlyBinding(t *testing.T, row *DurableOccurrence) *DurableBinding {
+func onlyBinding(t testing.TB, row *DurableOccurrence) *DurableBinding {
 	t.Helper()
 	if len(row.Bindings) != 1 {
 		t.Fatal(row)
@@ -132,7 +132,7 @@ func onlyBinding(t *testing.T, row *DurableOccurrence) *DurableBinding {
 
 // Seed a legitimate historical pending snapshot, as if accepted at 07:35 before
 // a process outage. The real store/transaction then recovers overdue work now.
-func pendingSnapshot(t *testing.T, m *DurableManager) *DurableOccurrence {
+func pendingSnapshot(t testing.TB, m *DurableManager) *DurableOccurrence {
 	t.Helper()
 	a := alertAt(t, "firing", "sla_id", "2026-01-05T07:30:00+01:00")
 	ref := PolicyRef{"sla_id", "business"}
@@ -592,5 +592,147 @@ func TestValkeyReconciliationRemovesOrphanMemberships(t *testing.T) {
 	}
 	if n := m.store.client.ZCard(ctx, m.store.key("due")).Val(); n != 0 {
 		t.Fatal("orphan future schedule retained", n)
+	}
+}
+
+func TestValkeyNoopReconciliationPreservesRecordAndWatch(t *testing.T) {
+	f := realValkey(t)
+	m := manager(t, integrationConfig(t, f))
+	ctx := context.Background()
+	row := acceptTest(t, m, "firing", "2026-01-05T08:30:00+01:00", "")
+	key := m.store.rowKey(row.ID)
+	before, err := m.store.client.Get(ctx, key).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var pending []string
+	// An unchanged reconciliation must not invalidate another instance's WATCH
+	// of either the authoritative record or any shared index.
+	keys := []string{key, m.store.key("due"), m.store.key("retention"), m.store.key("pending"), m.store.key("unresolved"), m.store.key("held"), m.store.key("intent-index")}
+	err = m.store.client.Watch(ctx, func(tx *redis.Tx) error {
+		for range 4 {
+			if err := m.maintenance(ctx, &pending); err != nil {
+				return err
+			}
+		}
+		_, err := tx.TxPipelined(ctx, func(p redis.Pipeliner) error { p.Set(ctx, m.store.key("test-watch"), "ok", 0); return nil })
+		return err
+	}, keys...)
+	if err != nil {
+		t.Fatal("no-op invalidated WATCH", err)
+	}
+	after, err := m.store.client.Get(ctx, key).Result()
+	if err != nil || after != before {
+		t.Fatal("unchanged occurrence rewritten", err, before, after)
+	}
+}
+
+func TestValkeyIndexOnlyRepairPreservesActiveClaim(t *testing.T) {
+	f := realValkey(t)
+	cfg := integrationConfig(t, f)
+	cfg.Durable.Scheduler.LeaseDuration = 3 * time.Second
+	m := manager(t, cfg)
+	ctx := context.Background()
+	row := pendingSnapshot(t, m)
+	claim, err := m.claim(ctx, row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry, err := m.store.client.PExpireTime(ctx, m.store.claimKey(row.ID)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both absent and incorrect indexes must be repaired without changing state.
+	if err := m.store.client.Del(ctx, m.store.key("pending"), m.store.key("unresolved")).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.client.ZAdd(ctx, m.store.key("due"), redis.Z{Score: 1, Member: row.ID}).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.store.client.SAdd(ctx, m.store.key("held"), row.ID).Err(); err != nil {
+		t.Fatal(err)
+	}
+	var pending []string
+	for range 3 {
+		if err := m.maintenance(ctx, &pending); err != nil {
+			t.Fatal(err)
+		}
+	}
+	after, err := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Result()
+	if err != nil || after != before {
+		t.Fatal("claim record changed during repair", err)
+	}
+	nextExpiry, err := m.store.client.PExpireTime(ctx, m.store.claimKey(row.ID)).Result()
+	if err != nil || nextExpiry != expiry {
+		t.Fatal("lease was renewed or removed", expiry, nextExpiry, err)
+	}
+	for _, index := range []string{"pending", "unresolved"} {
+		if !m.store.client.SIsMember(ctx, m.store.key(index), row.ID).Val() {
+			t.Fatal("missing membership", index)
+		}
+	}
+	if m.store.client.SIsMember(ctx, m.store.key("held"), row.ID).Val() {
+		t.Fatal("incorrect membership retained")
+	}
+	if score := m.store.client.ZScore(ctx, m.store.key("due"), row.ID).Val(); score != deadlineScore(claim.Claim.Until) {
+		t.Fatal("claim deadline not repaired", score)
+	}
+	if _, err := m.complete(ctx, claim); err != nil {
+		t.Fatal("repair fenced a valid worker", err)
+	}
+}
+
+func TestValkeyReconciliationRepairFencedByResolution(t *testing.T) {
+	f := realValkey(t)
+	m := manager(t, integrationConfig(t, f))
+	ctx := context.Background()
+	row := pendingSnapshot(t, m)
+	var once sync.Once
+	_, err := m.store.reconcile(ctx, row.ID, func(current *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
+		once.Do(func() { acceptTest(t, m, "resolved", "2026-01-05T07:30:00+01:00", "2026-01-05T07:45:00+01:00") })
+		return current, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed, err := m.store.load(ctx, row.ID)
+	if err != nil || closed.Lifecycle != LifecycleResolved {
+		t.Fatal(closed, err)
+	}
+	if n := m.store.client.ZCard(ctx, m.store.key("due")).Val(); n != 0 {
+		t.Fatal("stale repair restored scheduling", n)
+	}
+}
+
+func TestValkeyPipelinedTypeChecksRemainWatched(t *testing.T) {
+	f := realValkey(t)
+	m := manager(t, integrationConfig(t, f))
+	ctx := context.Background()
+	row := acceptTest(t, m, "firing", "2026-01-05T08:30:00+01:00", "")
+	before := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Val()
+	var once sync.Once
+	_, err := m.store.update(ctx, row.ID, func(current *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
+		// Corrupt an index after its TYPE check. WATCH must abort the queued
+		// transaction; its retry must detect corruption before writing any state.
+		once.Do(func() {
+			if err := m.store.client.Del(ctx, m.store.key("due")).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.store.client.Set(ctx, m.store.key("due"), "wrong type", 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+		})
+		current.Fence++
+		return current, nil
+	})
+	if err == nil {
+		t.Fatal("concurrent wrong-type corruption accepted")
+	}
+	if after := m.store.client.Get(ctx, m.store.rowKey(row.ID)).Val(); after != before {
+		t.Fatal("state changed across corrupt index")
 	}
 }

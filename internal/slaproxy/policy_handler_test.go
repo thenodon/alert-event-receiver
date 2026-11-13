@@ -17,7 +17,7 @@ import (
 
 type evaluatorFunc func(context.Context, PolicyInput, PolicyRef, string, time.Time) (Decision, error)
 
-func alertAt(t *testing.T, status, label, starts string) models.Alert {
+func alertAt(t testing.TB, status, label, starts string) models.Alert {
 	t.Helper()
 	alert := testAlert(status, map[string]string{label: "business"})
 	alert.StartsAt = instant(t, starts)

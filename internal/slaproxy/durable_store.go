@@ -1,6 +1,7 @@
 package slaproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -172,7 +173,17 @@ func (s *DurableStore) update(ctx context.Context, id string, mutate func(*Durab
 	return s.updateClaim(ctx, id, nil, mutate)
 }
 
-func (s *DurableStore) updateClaim(ctx context.Context, id string, required *SchedulerClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (committed *DurableOccurrence, err error) {
+func (s *DurableStore) updateClaim(ctx context.Context, id string, required *SchedulerClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (*DurableOccurrence, error) {
+	return s.updateRecord(ctx, id, required, mutate, false)
+}
+
+// reconcile distinguishes an occurrence change from index-only repair. An
+// unchanged record retains its exact version, timestamps and claim/token TTL.
+func (s *DurableStore) reconcile(ctx context.Context, id string, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error)) (*DurableOccurrence, error) {
+	return s.updateRecord(ctx, id, nil, mutate, true)
+}
+
+func (s *DurableStore) updateRecord(ctx context.Context, id string, required *SchedulerClaim, mutate func(*DurableOccurrence, time.Time) (*DurableOccurrence, error), reconcile bool) (committed *DurableOccurrence, err error) {
 	defer func() { s.record("update", err) }()
 	types := map[string]string{s.rowKey(id): "string", s.claimKey(id): "string", s.key("policies"): "string",
 		s.key("due"): "zset", s.key("retention"): "zset", s.key("unresolved"): "set", s.key("pending"): "set", s.key("held"): "set", s.key("intent-index"): "set"}
@@ -182,12 +193,24 @@ func (s *DurableStore) updateClaim(ctx context.Context, id string, required *Sch
 	}
 	for attempt := 0; attempt < 64; attempt++ {
 		err = s.client.Watch(ctx, func(tx *redis.Tx) error {
-			for key, expected := range types {
-				actual, err := tx.Type(ctx, key).Result()
+			// Keep every type check under WATCH, but send the independent
+			// reads in one round trip. No validation is cached or omitted.
+			checked := make(map[string]*redis.StatusCmd, len(types))
+			_, err := tx.Pipelined(ctx, func(p redis.Pipeliner) error {
+				for key := range types {
+					checked[key] = p.Type(ctx, key)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+			for key, command := range checked {
+				actual, err := command.Result()
 				if err != nil {
 					return err
 				}
-				if actual != "none" && actual != expected {
+				if actual != "none" && actual != types[key] {
 					return fmt.Errorf("unexpected type for SLA store key %s: %s", key, actual)
 				}
 			}
@@ -230,9 +253,31 @@ func (s *DurableStore) updateClaim(ctx context.Context, id string, required *Sch
 			if old != nil {
 				version = old.Version
 			}
+			var previous []byte
+			if reconcile {
+				previous, err = json.Marshal(old)
+				if err != nil {
+					return err
+				}
+			}
 			next, err := mutate(old, now.UTC())
 			if err != nil {
 				return err
+			}
+			if reconcile {
+				candidate, err := json.Marshal(next)
+				if err != nil {
+					return err
+				}
+				if bytes.Equal(previous, candidate) {
+					// No record write and no lease renewal. Repair only index
+					// discrepancies, guarded by the same WATCH/type checks.
+					err = s.repairIndexes(ctx, tx, id, next)
+					if err == nil {
+						committed = next
+					}
+					return err
+				}
 			}
 			var encoded []byte
 			var leaseTTL time.Duration
@@ -309,13 +354,131 @@ func (s *DurableStore) updateClaim(ctx context.Context, id string, required *Sch
 	return nil, fmt.Errorf("state transaction contention: %w", err)
 }
 
+// deadlineScore rounds up only a fractional millisecond. Exact timestamps
+// remain in the record and are checked again before claiming due work.
+func deadlineScore(at time.Time) float64 {
+	millis := at.UnixMilli()
+	if at.Nanosecond()%int(time.Millisecond) != 0 {
+		millis++
+	}
+	return float64(millis)
+}
+
+type occurrenceIndex struct {
+	key     string
+	sorted  bool
+	present bool
+	score   float64
+}
+
+func (s *DurableStore) occurrenceIndexes(row *DurableOccurrence) []occurrenceIndex {
+	indexes := []occurrenceIndex{
+		{key: s.key("due"), sorted: true}, {key: s.key("retention"), sorted: true},
+		{key: s.key("unresolved")}, {key: s.key("pending")}, {key: s.key("held")}, {key: s.key("intent-index")},
+	}
+	if row == nil {
+		return indexes
+	}
+	for i, at := range []time.Time{row.dueAt(), row.retentionAt()} {
+		indexes[i].present = !at.IsZero()
+		if indexes[i].present {
+			indexes[i].score = deadlineScore(at)
+		}
+	}
+	indexes[2].present = row.Lifecycle == LifecycleFiring
+	for _, b := range row.Bindings {
+		indexes[3].present = indexes[3].present || (row.Lifecycle == LifecycleFiring && b.Eligibility == EligibilityPending)
+		indexes[4].present = indexes[4].present || b.HoldReason != ""
+		for _, intent := range b.Intents {
+			indexes[5].present = indexes[5].present || (intent.Ready && !intent.Canceled)
+		}
+	}
+	return indexes
+}
+
+// repairIndexes reads membership in one pipeline. If everything matches it
+// sends no MULTI/EXEC at all. An index-only repair WATCHes the occurrence as well
+// as the indexes, so a concurrent lifecycle update always invalidates stale repair.
+func (s *DurableStore) repairIndexes(ctx context.Context, tx *redis.Tx, id string, row *DurableOccurrence) error {
+	indexes := s.occurrenceIndexes(row)
+	scores := make(map[string]*redis.FloatCmd)
+	members := make(map[string]*redis.BoolCmd)
+	var tokenExists *redis.IntCmd
+	_, err := tx.Pipelined(ctx, func(p redis.Pipeliner) error {
+		for _, index := range indexes {
+			if index.sorted {
+				scores[index.key] = p.ZScore(ctx, index.key, id)
+			} else {
+				members[index.key] = p.SIsMember(ctx, index.key, id)
+			}
+		}
+		if row == nil || row.Claim == nil {
+			tokenExists = p.Exists(ctx, s.claimKey(id))
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return err
+	}
+	var changes []occurrenceIndex
+	for _, index := range indexes {
+		if index.sorted {
+			score, err := scores[index.key].Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return err
+			}
+			present := err == nil
+			if present != index.present || (present && score != index.score) {
+				changes = append(changes, index)
+			}
+		} else {
+			present, err := members[index.key].Result()
+			if err != nil {
+				return err
+			}
+			if present != index.present {
+				changes = append(changes, index)
+			}
+		}
+	}
+	removeToken := false
+	if tokenExists != nil {
+		n, err := tokenExists.Result()
+		if err != nil {
+			return err
+		}
+		removeToken = n != 0
+	}
+	if len(changes) == 0 && !removeToken {
+		return nil
+	}
+	_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		for _, index := range changes {
+			if index.sorted {
+				if index.present {
+					p.ZAdd(ctx, index.key, redis.Z{Score: index.score, Member: id})
+				} else {
+					p.ZRem(ctx, index.key, id)
+				}
+			} else {
+				setMember(ctx, p, index.key, id, index.present)
+			}
+		}
+		if removeToken {
+			p.Del(ctx, s.claimKey(id))
+		}
+		return nil
+	})
+	return err
+}
+
 func queueScore(ctx context.Context, p redis.Pipeliner, key, id string, at time.Time) {
 	if at.IsZero() {
 		p.ZRem(ctx, key, id)
 		return
 	}
 	// Index rounding cannot advance a nanosecond-precision calendar deadline.
-	p.ZAdd(ctx, key, redis.Z{Score: float64(at.UnixMilli() + 1), Member: id})
+	p.ZAdd(ctx, key, redis.Z{Score: deadlineScore(at), Member: id})
 }
 func setMember(ctx context.Context, p redis.Pipeliner, key, id string, include bool) {
 	if include {

@@ -37,7 +37,7 @@ const exampleConfig = `sla_definitions:
           monday: ["00:00-24:00"]
 `
 
-func testConfig(t *testing.T) Config {
+func testConfig(t testing.TB) Config {
 	t.Helper()
 	cfg, err := LoadConfig(strings.NewReader(exampleConfig))
 	if err != nil {
