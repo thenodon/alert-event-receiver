@@ -112,7 +112,7 @@ func TestSchedulerAndDeliveryIndependentTransactions(t *testing.T) {
 	second.durable.store.client.AddHook(hooks)
 	outcomes := make(chan error, 2)
 	go func() { outcomes <- first.durable.runOne(context.Background(), pending.ID) }()
-	go func() { outcomes <- second.dispatcher.runOne(context.Background(), ready.ID) }()
+	go func() { outcomes <- second.dispatcher.runOne(context.Background(), testDeliveryWork(ready.ID)) }()
 	for range 2 {
 		if err := <-outcomes; err != nil {
 			t.Fatal(err)
@@ -313,7 +313,7 @@ func TestWrongTypePreflightStopsAllDeliveryInstances(t *testing.T) {
 	if after := first.durable.store.client.Get(ctx, first.durable.store.rowKey(row.Occurrence.ID)).Val(); after != before {
 		t.Fatal("preflight violation committed state")
 	}
-	if err := second.dispatcher.runOne(ctx, row.Occurrence.ID); !errors.Is(err, ErrIndexSchema) {
+	if err := second.dispatcher.runOne(ctx, testDeliveryWork(row.Occurrence.ID)); !errors.Is(err, ErrIndexSchema) {
 		t.Fatal("peer dispatched after quarantine", err)
 	}
 	if len(sink.snapshot()) != 0 {
@@ -332,13 +332,13 @@ func TestClaimExpirationDuringTransactionStillFences(t *testing.T) {
 			if delivery {
 				s := deliveryService(t, deliveryConfig(t, f), &controlledSink{})
 				row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-				claimed, err := s.dispatcher.claim(ctx, row.ID)
+				claimed, err := s.dispatcher.claim(ctx, testDeliveryWork(row.ID))
 				if err != nil {
 					t.Fatal(err)
 				}
 				before := s.durable.store.client.Get(ctx, s.durable.store.rowKey(row.ID)).Val()
-				_, err = s.durable.store.updateDelivery(ctx, row.ID, claimed.DeliveryClaim, func(candidate *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
-					waitPast(t, claimed.DeliveryClaim.Until)
+				_, err = s.durable.store.updateDelivery(ctx, row.ID, onlyBinding(t, claimed).Claim, func(candidate *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
+					waitPast(t, onlyBinding(t, claimed).Claim.Until)
 					candidate.Fence++
 					return candidate, nil
 				})
@@ -414,7 +414,7 @@ func TestIndependentDeliveryAcrossInstancesHasNoFalseConflicts(t *testing.T) {
 		workers.Go(func() {
 			<-start
 			for i := instance; i < len(ids); i += len(services) {
-				if err := s.dispatcher.runOne(ctx, ids[i]); err != nil {
+				if err := s.dispatcher.runOne(ctx, testDeliveryWork(ids[i])); err != nil {
 					outcomes <- err
 					return
 				}

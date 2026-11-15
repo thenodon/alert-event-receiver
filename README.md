@@ -245,15 +245,16 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
-## Alert SLA Proxy (Phases 2–4A)
+## Alert SLA Proxy (Phases 2–4B)
 
 The separate `alert-sla-proxy` selects label-based SLA policies and evaluates
 weekly IANA schedules, holidays and active-interval overlap. By default it is
 stateless `observe_only`. Opt-in Phase 3 persists occurrences in Valkey, schedules
 pending alerts, handles out-of-order resolutions and prepares durable intent.
-With delivery disabled it never invokes a sink. Opt-in Phase 4A adds a real
-logging destination with durable receipts, retries and at-least-once attempts;
-HTTP delivery is not implemented.
+With delivery disabled it never invokes a sink. Opt-in delivery supports multiple
+named log and HTTP webhook destinations, with independent durable receipts,
+retries and at-least-once attempts. HTTP requests contain one original Alertmanager
+alert; Basic Authentication credentials come from environment variables.
 
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
@@ -261,8 +262,10 @@ go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
 # Or durable lifecycle/scheduling, with a configured persistent Valkey:
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-durable.yaml
-# Or enable the real logging sink (increase the policy epoch for an existing namespace):
+# Or enable a real logging destination:
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-log.yaml
+# Or generic HTTP delivery to ServiceNow plus an audit log sink (set auth env vars):
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-http.yaml
 ```
 
 Phase 3 trusts Alertmanager's webhook lifecycle. If an SLA opportunity arrives
@@ -277,9 +280,12 @@ acceptance is not unconditional disk/replica persistence. Lifecycle, SLA eligibi
 and delivery status remain independent; policy changes hold pending bindings.
 The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz`, `/readyz`.
 Existing receiver lifecycle, Valkey schema and OTLP behavior are unchanged.
-Upgrading an existing SLA namespace to the hardened store protocol requires a
-higher `durable.policy_epoch`. See the [hardening guide](docs/sla-proxy-hardening.md)
-for index-corruption quarantine/recovery and concurrent delivery measurements.
+Sink bindings are frozen at first durable acceptance, including pending alerts.
+New sinks affect new occurrences only; changing/removing a registered destination
+fails startup. Approved catalog changes require a higher `durable.policy_epoch`.
+There is no legacy schema migration. See the [service guide](docs/alert-sla-proxy.md)
+for multi-sink YAML, ServiceNow setup, recovery, metrics and security.
+HTTP 2xx means API acceptance, not completed ServiceNow processing.
 
 See the [service guide](docs/alert-sla-proxy.md),
 [Phase 3 implementation and operations](docs/sla-proxy-phase3.md), and
@@ -566,7 +572,7 @@ inspection and idempotency troubleshooting.
 
 ## Current limitations and roadmap
 
-The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation, opt-in durable SLA scheduling and a real logging delivery sink. HTTP delivery remains deferred.
+The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation, opt-in durable SLA scheduling and independent log/HTTP delivery sinks with at-least-once attempts.
 
 v0.2.0 focuses on best-effort delivery observability. It adds no persistent queue, retries, replay, policies, or sinks.
 

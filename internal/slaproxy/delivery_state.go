@@ -2,47 +2,30 @@ package slaproxy
 
 import "time"
 
-func (o *DurableOccurrence) hasDelivery() bool {
-	if o == nil {
-		return false
-	}
-	if o.DeliveryClaim != nil {
-		return true
-	}
-	for _, b := range o.Bindings {
-		if b.SinkType != "" {
-			return true
-		}
-	}
-	return false
-}
 func (o *DurableOccurrence) outstandingDelivery() bool {
 	if o == nil {
 		return false
 	}
 	for _, b := range o.Bindings {
-		if b.SinkType == "" {
-			continue
+		if b.Claim != nil {
+			return true
 		}
 		for _, i := range b.Intents {
-			if i.Receipt == nil && (i.AuthorizedAt != nil || (!i.Canceled && (i.Ready || i.PermanentFailure))) {
+			if i.Receipt != nil {
+				continue
+			}
+			if i.AuthorizedAt != nil || (!i.Canceled && (i.Ready || i.PermanentFailure || (i.Action == "firing" && o.Lifecycle == LifecycleFiring && b.Eligibility == EligibilityEligible) || (i.Action == "resolved" && b.FiringDeliveredAt != nil && o.Lifecycle == LifecycleResolved))) {
 				return true
 			}
 		}
 	}
-	return o.DeliveryClaim != nil
+	return false
 }
 
 // refreshDelivery derives readiness and the binding summary from existing
 // lifecycle/eligibility and per-action receipts. It is not a second lifecycle FSM.
 func (m *DurableManager) refreshDelivery(row *DurableOccurrence) {
 	for _, b := range row.Bindings {
-		if b.SinkType == "" && m.cfg.Delivery.Enabled {
-			b.SinkType = m.cfg.Delivery.Sink.Type
-		}
-		if b.SinkType == "" {
-			continue
-		} // Preserve unenabled Phase 3 semantics.
 		firing := b.Intents["firing"]
 		if firing != nil {
 			switch {
@@ -81,30 +64,22 @@ func (m *DurableManager) refreshDelivery(row *DurableOccurrence) {
 	}
 }
 
-func (o *DurableOccurrence) deliveryDueAt() time.Time {
-	if o == nil {
-		return time.Time{}
-	}
-	if o.DeliveryClaim != nil {
-		return o.DeliveryClaim.Until
+func (b *DurableBinding) deliveryDueAt(row *DurableOccurrence) time.Time {
+	if b.Claim != nil {
+		return b.Claim.Until
 	}
 	var due time.Time
-	for _, b := range o.Bindings {
-		if b.SinkType == "" || b.HoldReason != "" {
+	for _, action := range []string{"firing", "resolved"} {
+		i := b.Intents[action]
+		if !deliveryActionable(row, b, i) {
 			continue
 		}
-		for _, action := range []string{"firing", "resolved"} {
-			i := b.Intents[action]
-			if !deliveryActionable(o, b, i) {
-				continue
-			}
-			at := i.NextAttemptAt
-			if at.IsZero() {
-				at = i.CreatedAt
-			}
-			if due.IsZero() || at.Before(due) {
-				due = at
-			}
+		at := i.NextAttemptAt
+		if at.IsZero() {
+			at = i.CreatedAt
+		}
+		if due.IsZero() || at.Before(due) {
+			due = at
 		}
 	}
 	return due
@@ -124,15 +99,10 @@ func deliveryActionable(row *DurableOccurrence, b *DurableBinding, i *DeliveryIn
 	return (row.Lifecycle == LifecycleFiring && b.Eligibility == EligibilityEligible) || i.AuthorizedAt != nil
 }
 
-func (o *DurableOccurrence) deliveryHeld() bool {
-	if o == nil {
-		return false
-	}
-	for _, b := range o.Bindings {
-		for _, i := range b.Intents {
-			if i.Receipt == nil && i.PermanentFailure && !i.Canceled {
-				return true
-			}
+func (b *DurableBinding) deliveryHeld() bool {
+	for _, i := range b.Intents {
+		if i.Receipt == nil && !i.Canceled && (i.PermanentFailure || b.HoldReason != "") {
+			return true
 		}
 	}
 	return false

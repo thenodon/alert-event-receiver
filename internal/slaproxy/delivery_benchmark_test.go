@@ -89,7 +89,7 @@ func BenchmarkDelivery(b *testing.B) {
 					var competitors sync.WaitGroup
 					for range 4 {
 						competitors.Go(func() {
-							if err := s.dispatcher.runOne(ctx, ids[i]); err != nil {
+							if err := s.dispatcher.runOne(ctx, testDeliveryWork(ids[i])); err != nil {
 								b.Error(err)
 							}
 						})
@@ -98,7 +98,7 @@ func BenchmarkDelivery(b *testing.B) {
 				case "WebhookAndDelivery":
 					var both sync.WaitGroup
 					both.Go(func() {
-						if err := s.dispatcher.runOne(ctx, ids[i]); err != nil {
+						if err := s.dispatcher.runOne(ctx, testDeliveryWork(ids[i])); err != nil {
 							b.Error(err)
 						}
 					})
@@ -111,7 +111,7 @@ func BenchmarkDelivery(b *testing.B) {
 					})
 					both.Wait()
 				default:
-					if err := s.dispatcher.runOne(ctx, ids[i]); err != nil {
+					if err := s.dispatcher.runOne(ctx, testDeliveryWork(ids[i])); err != nil {
 						b.Error(err)
 					}
 				}

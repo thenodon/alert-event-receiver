@@ -51,18 +51,21 @@ type DeliveryIntent struct {
 }
 
 type DurableBinding struct {
-	ID               string                     `json:"id"`
-	SinkType         string                     `json:"sink_type,omitempty"`
-	Policy           PolicyRef                  `json:"policy"`
-	SinkID           string                     `json:"sink_id"`
-	PolicyVersion    string                     `json:"policy_version"`
-	Calendar         Decision                   `json:"calendar"`
-	Eligibility      EligibilityStatus          `json:"eligibility"`
-	Delivery         DeliveryStatus             `json:"delivery"`
-	HoldReason       string                     `json:"hold_reason,omitempty"`
-	NextEvaluationAt time.Time                  `json:"next_evaluation_at"`
-	RetryCount       int                        `json:"retry_count"`
-	Intents          map[string]*DeliveryIntent `json:"intents"`
+	DestinationFingerprint string                     `json:"destination_fingerprint"`
+	Claim                  *DeliveryClaim             `json:"claim,omitempty"`
+	DeliveryFence          uint64                     `json:"delivery_fence"`
+	ID                     string                     `json:"id"`
+	SinkType               string                     `json:"sink_type,omitempty"`
+	Policy                 PolicyRef                  `json:"policy"`
+	SinkID                 string                     `json:"sink_id"`
+	PolicyVersion          string                     `json:"policy_version"`
+	Calendar               Decision                   `json:"calendar"`
+	Eligibility            EligibilityStatus          `json:"eligibility"`
+	Delivery               DeliveryStatus             `json:"delivery"`
+	HoldReason             string                     `json:"hold_reason,omitempty"`
+	NextEvaluationAt       time.Time                  `json:"next_evaluation_at"`
+	RetryCount             int                        `json:"retry_count"`
+	Intents                map[string]*DeliveryIntent `json:"intents"`
 	// Successful firing evidence; populated only after the sink succeeds.
 	FiringDeliveredAt *time.Time `json:"firing_delivered_at,omitempty"`
 }
@@ -74,7 +77,10 @@ type SchedulerClaim struct {
 	Version uint64    `json:"version"`
 }
 
+const occurrenceFormatVersion = 2
+
 type DurableOccurrence struct {
+	FormatVersion            int             `json:"format_version"`
 	ID                       string          `json:"id"`
 	Fingerprint              string          `json:"fingerprint"`
 	StartsAt                 time.Time       `json:"starts_at"`
@@ -99,8 +105,6 @@ type DurableOccurrence struct {
 	DeleteAt             *time.Time                 `json:"delete_at,omitempty"`
 	Compacted            bool                       `json:"compacted"`
 	ResolutionConflict   bool                       `json:"resolution_conflict"`
-	DeliveryClaim        *DeliveryClaim             `json:"delivery_claim,omitempty"`
-	DeliveryFence        uint64                     `json:"delivery_fence,omitempty"`
 }
 
 func tupleID(values ...string) string {

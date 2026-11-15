@@ -1,4 +1,4 @@
-# Alert SLA Proxy — observation, durable state and logging delivery
+# Alert SLA Proxy — observation, durable state and multi-sink delivery
 
 `alert-sla-proxy` is independent of the existing OTLP event receiver. It validates
 Alertmanager notifications, selects label-based SLA policies and evaluates calendar
@@ -8,11 +8,11 @@ eligibility and active-interval overlap. It supports three explicitly selected m
 |---|---|---|
 | Defaults | `observe_only` | Phase 2: stateless validation and calendar/lifecycle evidence observations |
 | `durable.enabled: true` | `durable_state_only` | Phase 3: Valkey acceptance, lifecycle state, scheduling and prepared intents; no sink calls |
-| Also `delivery.enabled: true` | `delivery_enabled` | Phase 4A: durable dispatcher and real logging destination; successful sink calls gain durable receipts |
+| Also `delivery.enabled: true` | `delivery_enabled` | Phase 4B: independent log/HTTP destinations with per-sink retries and receipts |
 
 There is no Alertmanager API verification, silence/inhibition recheck, invented
-freshness timeout or HTTP sink. Keep existing operational notification routes
-until logging delivery is the destination you intend. See the
+freshness timeout. Delivery is explicitly enabled; keep existing operational
+notification routes until the new destinations are verified. See the
 [Phase 3 guide](sla-proxy-phase3.md), [durable example](examples/alert-sla-proxy-durable.yaml)
 and [logging delivery example](examples/alert-sla-proxy-delivery-log.yaml).
 
@@ -335,54 +335,68 @@ not Alertmanager routing itself.
 
 See the [decision register](sla-proxy-decisions.md) for architecture reuse and
 approval gates. Phase 3 durable state/scheduling is described in its separate
-guide. Logging delivery is described below; HTTP delivery and real enrichment remain outside this implementation.
+guide. Multi-sink delivery is described below; real enrichment remains outside scope.
 
 
-## Phase 4A delivery framework
+## Multi-sink delivery (Phase 4B)
 
-The logging sink is a **real destination**. It is not a dry run and is explicitly
-opt-in. A sink performs one operation through `Sink.Deliver(context.Context,
-DeliveryEvent) error`; it knows nothing about Valkey or scheduling. The dispatcher
-owns discovery, claims, authorization, ordering, retries and receipts. Future
-transports can implement this interface without replacing the dispatcher. No
-HTTP destination or transport credentials are configured in Phase 4A.
+A `Sink.Deliver(context.Context, DeliveryEvent) error` implementation performs one
+external operation. It knows nothing about Valkey or scheduling. The existing
+dispatcher owns claims, authorization, retries, ordering and receipts. Supported
+sinks are `log` and generic `http`; multiple named sinks of either type can run
+simultaneously. Every selected occurrence targets all configured sinks. There is
+no SLA-dependent destination routing or ServiceNow-specific transformation.
 
 ```mermaid
 flowchart LR
-    A[Webhook validation] --> B[Valkey lifecycle acceptance]
-    B --> C[SLA scheduler / eligible intent]
-    C --> D[Fenced delivery claim]
-    D --> E[Durable send authorization]
-    E --> F[Log sink outside transaction]
-    F --> G[Atomic receipt / next delivery action]
-    F --> H[Durable retry deadline on failure]
-    H --> D
-    G --> I[Resolution ready only after firing receipt]
+    W[Webhook validation] --> V[Atomic Valkey acceptance]
+    V --> E[SLA scheduling / eligibility]
+    E --> A[HTTP binding: claim and authorization]
+    E --> B[Audit binding: claim and authorization]
+    A --> H[HTTP POST outside transaction]
+    B --> L[Structured log outside transaction]
+    H --> R[HTTP receipt or retry deadline]
+    L --> S[Audit receipt or retry deadline]
+    R --> X[Resolution ready after this sink's firing receipt]
+    S --> Y[Resolution ready after this sink's firing receipt]
 ```
 
-These are distinct events: HTTP acceptance does not mean SLA eligibility;
-eligibility does not mean sink acceptance; a successful log operation does not
-mean its receipt was committed; a receipt does not guarantee durable log storage.
-The HTTP handler never waits for sink delivery. Enabled responses retain schema
-3, use `mode: delivery_enabled`, and add `delivery_enabled: true`. `persisted`
-means all selected occurrences committed. `forwarded: false` describes the
-webhook handler's lack of synchronous forwarding, not absence of asynchronous
-logging delivery. The occurrence/binding summaries show the acceptance-time delivery snapshot,
-which may already lag the asynchronous dispatcher when the response arrives;
-receipts in Valkey and delivery metrics/logs show dispatcher outcomes.
+Webhook acceptance, SLA eligibility, intent readiness, sink acceptance and a
+committed delivery receipt are separate events. The webhook handler never waits
+for delivery. Enabled responses use schema 3, `mode: delivery_enabled` and
+`delivery_enabled: true`. `persisted` means every selected occurrence committed;
+`forwarded: false` means the handler does not forward synchronously. Its binding
+summaries are acceptance-time snapshots; inspect receipts and metrics for later
+asynchronous progress. HTTP 503 permits safe retry of the entire webhook batch.
+A Valkey transaction acknowledgement is subject to Valkey's disk/replica settings.
 
-### Configuration and activation
+### Configuration and destination identity
+
+See the complete [HTTP + audit example](examples/alert-sla-proxy-delivery-http.yaml)
+and [log-only example](examples/alert-sla-proxy-delivery-log.yaml).
 
 ```yaml
 durable:
   enabled: true
-  policy_epoch: 3
-  sink_id: default
-  # Other Valkey/scheduler/retention settings: see complete example.
+  policy_epoch: 1
+  valkey:
+    address: 127.0.0.1:6379
+    namespace: sla
+
 delivery:
   enabled: true
-  sink:
-    type: log
+  sinks:
+    - id: servicenow
+      type: http
+      http:
+        url: https://sn.acme.se/api/sn_em_connector/em/inbound_event?source=prometheus
+        timeout: 10s
+        basic_auth:
+          username_env: SERVICENOW_USERNAME
+          password_env: SERVICENOW_PASSWORD
+        idempotency_key: true
+    - id: audit
+      type: log
   dispatcher:
     poll_interval: 1s
     workers: 4
@@ -393,212 +407,248 @@ delivery:
     retry_max: 5m
 ```
 
-Build and run the [complete example](examples/alert-sla-proxy-delivery-log.yaml):
+Set credentials through the deployment's secret mechanism, then start:
 
 ```bash
-go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
-/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-log.yaml
+# SERVICENOW_USERNAME and SERVICENOW_PASSWORD must be set in the environment.
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-http.yaml
 ```
 
-Delivery defaults to disabled and requires durable mode. Only `type: log` is
-accepted. Polling must be 10ms–1m, workers 1–64, batch size 1–1000, and delivery
-timeout positive and at most 1m. The claim lease must cover **delivery timeout +
-three state-store operation timeouts**, and be at most 10m. Authorization also
-checks the remaining lease budget before allowing sink I/O. Retry initial must
-be at least the poll interval; retry maximum must be at least initial and at most
-1h. Unknown YAML fields still fail strict decoding.
+Delivery defaults to disabled. The native default sink list is one `default` log
+sink. Explicit durable configuration must contain 1–32 sinks with unique stable
+IDs matching `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`. Unknown types/fields, duplicate
+IDs, malformed URLs, userinfo/fragments, missing authentication variables and
+invalid timeouts fail startup. Both credential variable names must be provided
+together. Values must be nonempty; username colons and credential CR/LF are
+rejected. All configured sinks are validated even when dispatch is disabled.
 
-Before enabling in an existing namespace, upgrade **all instances** to this
-version and increase `durable.policy_epoch`. Delivery activation includes a
-`delivery-v1` format/implementation marker. The hardened store additionally uses
-`index-schema-v1` in both durable modes, so upgrading an existing state-only or
-delivery-enabled namespace also requires a higher epoch. Individual SLA policy
-versions and existing occurrence/intent identities are unchanged. An unchanged epoch with a different
-mode fails startup. The higher epoch fences old running instances, and affected
-instances fail readiness and cannot commit. Do not run an old binary against an
-activated namespace or try to downgrade it by increasing its epoch.
+HTTP timeout must be positive and no greater than `dispatcher.delivery_timeout`.
+Shared delivery timeout must be positive and at most 1 minute; claim lease must
+cover it plus **three** durable `operation_timeout` budgets and be at most 10
+minutes. Workers: 1–64; batch: 1–1000; poll: 10ms–1m. Retry initial must be at least
+the polling interval; maximum must be at least initial and at most 1 hour.
+The default 30s lease covers 10s delivery plus 3 × 5s state-store budgets.
 
-Activation adopts existing unconsumed Phase 3 firing intents through bounded
-maintenance. It never creates a first firing delivery for an already resolved
-occurrence. The extra `destination:<hash-of-sink-id>` string permanently pins the
-logical sink ID to `log`. Changing transport for that ID requires a reviewed
-migration; a higher policy epoch alone does not bypass the pin. No such migration
-or HTTP transport is implemented here. To disable delivery deliberately, deploy
-this same version with a higher epoch and delivery disabled; it preserves existing
-receipts/work but stops dispatch. Reenable with another higher epoch.
+**Binding snapshot:** the complete sink set is frozen in the occurrence's first
+successful Valkey acceptance, including occurrences initially pending SLA. A
+repeat webhook, SLA opening, resolution or restart never adds historical bindings.
+Occurrence identity remains the hash of fingerprint and canonical UTC
+RFC3339Nano startsAt. Binding identity includes occurrence, SLA label/value and
+sink ID; firing/resolved intent IDs include occurrence, binding and action.
+Claim tokens, fences, retries, authorization snapshots and receipts live on each
+binding. The occurrence remains the single authoritative lifecycle document.
 
-### State, concurrency and resolution races
+An immutable `destinations` registry stores sink IDs and SHA-256 configuration
+fingerprints. It stores no credential values. Fingerprints include type, URL
+(including query), timeout, authentication variable names and idempotency-header
+setting. Rotating credential **values** is supported on restart without changing
+identity. Changing any fingerprint field or removing a registered sink fails
+startup, even if its known work has completed. This conservative append-only rule
+prevents accidental discard/redirection; automated retirement/redrive is outside
+this phase. Do not delete registry entries to bypass it.
 
-The existing occurrence identity and lifecycle state remain unchanged. New
-optional JSON fields extend the same authoritative occurrence record:
+Adding a new unique sink is supported with a higher `durable.policy_epoch` and
+retention of all registered destinations. It affects new occurrences only. The
+active registry digest also includes policies, sink catalog and delivery enablement.
+Enable/disable or approved catalog/policy changes require a higher epoch; the
+same configuration and epoch can restart or run concurrently. Roll out catalog
+changes deliberately: a new active epoch fences old instances. Policy changes
+hold pinned affected bindings instead of reinterpreting their historical calendar.
+Resolution remains accepted against the original stored occurrence.
 
-- Binding `sink_type`; existing `firing_delivered_at` now contains receipt evidence.
-- Intent `attempts`, first `authorized_at`, `next_attempt_at`, bounded
-  `last_failure`, `permanent_failure`, frozen retry `payload` and `receipt`.
-- Occurrence `delivery_fence` and `delivery_claim` containing owner token, fence,
-  binding/intent/action, expiration and `sending` authorization state.
-- Receipt intent/sink IDs, sink-completion and commit times, cumulative authorized
-  attempts, fence, committing record version and `status: delivered`.
+This release uses the new `delivery.sinks` YAML and occurrence format 2 directly.
+`durable.sink_id` and `delivery.sink` are rejected. There is no legacy schema
+adoption, migration or compatibility path. Development data from earlier formats
+requires a deliberately separate/empty namespace, not an in-place upgrade.
 
-Legacy Phase 3 records decode with zero/nil defaults; no occurrence-key migration
-or identity recomputation occurs. Per-action receipts, not the aggregate binding
-status, decide whether an action has already succeeded.
+### HTTP payload and security
 
-| Condition | Result |
+Every HTTP request is a POST with `Content-Type: application/json` and **exactly
+one alert**, using the original Alertmanager notification metadata and alert data:
+
+```json
+{
+  "receiver": "sla-proxy",
+  "status": "firing",
+  "alerts": [{
+    "status": "firing",
+    "labels": {"alertname": "HighCPU", "sla_id": "production"},
+    "annotations": {"summary": "CPU utilization is high"},
+    "startsAt": "2026-11-15T07:00:00.123456789Z",
+    "endsAt": "0001-01-01T00:00:00Z",
+    "generatorURL": "https://prometheus.example/graph",
+    "fingerprint": "original-fingerprint"
+  }],
+  "groupLabels": {}, "commonLabels": {}, "commonAnnotations": {},
+  "externalURL": "", "version": "4", "groupKey": "", "truncatedAlerts": 0
+}
+```
+
+Receiver, groupKey, group/common labels and annotations, externalURL, version and
+truncatedAlerts are preserved where supplied. Missing original strings stay empty;
+empty map containers serialize as `{}`. No receiver, group key, labels or
+annotations are synthesized from unrelated records. Fingerprint, generatorURL,
+labels, annotations and nanosecond timestamps are preserved. Top-level and alert
+statuses match the intent action. Resolved delivery uses the stored resolution
+notification. Firing endsAt is forwarded as originally received; it is **not**
+used as authoritative resolution state. No SLA-specific labels are injected.
+
+The full per-alert notification and original group metadata are already retained
+in the occurrence. Authorization freezes that notification onto the intent before
+I/O, so later webhook updates and process restarts do not change its logical retry
+payload. Different alerts in an incoming batch never share reconstructed payloads.
+
+This is a generic Alertmanager webhook, suitable for the
+[ServiceNow Prometheus connector](https://www.servicenow.com/docs/r/it-operations-management/event-management/prometheus-events-integration.html).
+Configure its Event Management connector/plugin, integration user permissions and
+field/CI handling in ServiceNow. The proxy does not implement a ServiceNow API,
+severity mapping or guarantee connector processing after acceptance. Validation
+uses local HTTP fixtures; a real ServiceNow tenant must be tested before production.
+
+Use HTTPS for production Basic Authentication. TLS verifies certificates through
+normal system roots; there is no insecure-skip option. Plain HTTP is allowed for
+local/private deployment testing and exposes credentials/payloads on the wire.
+Redirects are never followed. One shared HTTP transport reuses connections; HTTP/1
+with a non-rewindable POST body prevents transparent transport replays, including
+when Idempotency-Key is present. All retries belong to the durable dispatcher.
+Responses have a 64 KiB header limit; at most 64 KiB + 1 response-body bytes are
+read/discarded before closing. Oversized bodies are not retained or logged and may
+prevent connection reuse. A 2xx remains API acceptance even if its discarded body
+is truncated; body contents do not define application-level success here.
+
+URLs, authentication values/headers, response bodies and alert payloads are not
+included in HTTP delivery logs or returned transport errors. Labels and annotations
+are deliberately sent to the configured destination and remain sensitive stored
+payload data. Protect YAML, credential environment, Valkey, logs and network access.
+There is no arbitrary per-alert URL routing. Endpoints and any environment proxy
+settings are trusted operator configuration.
+
+### Delivery, ordering and retries
+
+| Condition | Action |
 |---|---|
-| Firing not yet SLA eligible | Lifecycle remains firing, eligibility pending; no sink call |
-| Eligible firing, no receipt or hold | Firing intent is ready; dispatcher may claim it |
-| Resolution committed before send authorization | Cancel unsent firing; no standalone resolution |
-| Resolution committed after authorization / during the call | Preserve the authorized firing attempt and its evidence; merge a successful firing receipt into latest resolved state |
-| Successful firing receipt plus known resolution | Resolution becomes ready even outside SLA hours |
-| Successful action receipt plus repeated webhook | Keep receipt; do not send that action again |
-| Retryable failure | `delivery_failed`, durable future retry deadline, same intent ID |
-| Permanent/preparation failure | `delivery_failed`, retained payload/state and operational hold; no automatic retry/discard |
-| Policy change/removal | Preserve accepted lifecycle and historical facts; pending delivery is held, including pending resolutions, until the approved pinned policy is restored/migrated |
+| Pending SLA | Persist and schedule; no sink call |
+| Eligible, known firing | Ready firing intent for each frozen sink |
+| Resolution before authorization | Cancel that sink's unsent firing; no standalone resolution |
+| Resolution after authorization | Preserve potentially delivered firing and recover its receipt/retry |
+| Successful firing receipt for a sink | That sink may deliver the corresponding resolution, even outside SLA |
+| Receipt already committed | Repeated webhooks/discovery do not resend that action |
+| 2xx HTTP | Sink success; attempt to commit receipt |
+| 408, 429, 5xx, network error or timeout | Durable retry; timeout/connection failure may have an unknown external outcome |
+| Other 4xx, redirects or other unsupported status | Explicit permanent failure/hold; no automatic redrive |
+| Shutdown cancellation | Retain authorization and a retryable outcome for restart recovery |
 
-Claims are **occurrence-scoped**, serializing even multiple bindings in one
-occurrence. Different occurrences can run concurrently. This is stronger than
-per-sink ordering and avoids a second lifecycle state machine.
+Retry delay uses exponential backoff with jitter, default 5s initially and 5m
+maximum, without an arbitrary attempt limit. Valid `Retry-After` on 429/503 delays
+the next attempt by at least that hint or the backoff, whichever is longer. Delta
+seconds and HTTP dates are supported; hints are capped at 24h. Other responses
+ignore this header. A failing binding does not hot-loop or retry successful sinks.
 
-`delivery-due` is a sorted set of occurrence IDs: ready/retry deadlines for
-unclaimed work, lease expiration for claimed work. `delivery-ready` is a set of
-unclaimed queued work (including retry-delayed work), `delivery-claimed` contains
-persisted claims, and `delivery-held` contains permanent/preparation failures.
-The existing `intent-index` remains readiness metadata; it is not a substitute
-for deadline-based delivery discovery. Bounded reconciliation repairs missing or
-inconsistent secondary indexes without rewriting unchanged records. Claims also
-use a separate expiring `delivery-claim:<occurrence-id>` token key with an absolute
-expiration, so unrelated webhook writes do not renew the lease.
+`Idempotency-Key` defaults to the stable intent ID and can be disabled with
+`http.idempotency_key: false`. It remains identical across retries. Do not assume
+ServiceNow or another receiver deduplicates this header. The guarantee is **at
+least once**, never exactly once. HTTP 2xx means transport/API acceptance, not
+confirmed downstream event creation, persistence or workflow completion.
 
-Shared indexes are not WATCHed: normal updates address individual occurrence
-members and can commit independently. Occurrence documents, claim tokens, policy/
-destination registries and the schema fence are protected. TYPE preflight is not
-atomic protection against an external actor changing an index type; a detected
-violation or EXEC command error stops processing and quarantines the namespace.
-**A partial record write is possible on that failed EXEC and is not acknowledged.**
-See the [hardening safety strategy and repair procedure](sla-proxy-hardening.md)
-for the schema ownership contract, operator fencing and exact changed guarantees.
+Authorization is the durable send decision. Resolution before it cancels a first
+firing. Resolution racing after authorization may coincide with the external call;
+the firing receipt merges into the latest resolved occurrence and enables that
+sink's resolution. No transaction can atomically coordinate Valkey and HTTP/log
+side effects. A crash after authorization but before I/O is indistinguishable from
+a successful send followed by a lost receipt. Recovery may retry that authorized
+firing even when a resolution is now known. Stable intent IDs identify duplicates.
+There is no retroactive **first authorization** after resolution.
 
-Every claim/authorization/receipt uses WATCH/MULTI/EXEC, the existing JSON source
-of truth and guarded index updates. No transaction is held during the sink call.
-The final pre-send validation and authorization transaction checks the latest
-lifecycle, policy hold, eligibility, intent and claim. Its successful commit is
-the **send linearization point**. A resolution committed before it cancels the
-first firing send; after it, the attempt is considered in progress. There is an
-unavoidable gap between authorization commit and the first instruction in the
-external sink: a resolution in that gap does not revoke the authorized attempt.
-Authorization alone is never a successful delivery receipt.
+### Concurrency, corruption and recovery
 
-Receipt commit checks the delivery token, fencing generation, intent and lease,
-then merges into the latest occurrence. It intentionally does **not** require an
-unchanged occurrence version, because a webhook may have legitimately recorded a
-resolution or repeat during sink I/O. Delivery fencing is separate from the SLA
-scheduler's claim/version fencing. A stale or expired delivery owner cannot
-commit a receipt. Sink success is still recorded if a resolution arrived during
-a valid owned attempt, enabling the corresponding resolution afterwards.
+Ready work is a binding member `<occurrence_id>:<binding_id>` in the shared
+`delivery-due` sorted set. Each binding has its own `DeliveryClaim`, monotonically
+increasing fence and token key `delivery-claim:<occurrence_id>:<binding_id>`.
+Other keys retain the namespace hash tag, e.g. `sla:{sla}:...`, for same-slot
+transactions. Lifecycle JSON, claims, receipts and required index changes commit
+in one WATCH/MULTI/EXEC. No Lua is used.
 
-### At-least-once recovery and retries
+Ordinary transactions WATCH the occurrence, occurrence scheduler token, targeted
+binding delivery token (when applicable), policy registry, destination registry
+and index-schema fence. Shared indexes are never watched. Independent occurrences
+therefore avoid conflicts caused solely by shared membership updates. Sinks on
+the same occurrence may briefly contend on its authoritative JSON; each retry
+merges current state. A slow external call holds no WATCH connection or transaction
+and does not block a different binding's claim or receipt. The shared fixed worker
+pool is bounded; enough slow calls can occupy all workers until timeout.
 
-This implements **at-least-once attempts**, not exactly-once side effects. A crash,
-connection loss or claim expiration after external acceptance but before a
-receipt commit makes the outcome uncertain. The durable authorization and frozen
-payload survive. After lease expiry, another worker may retry with the **same
-intent ID**, including when the occurrence is now resolved. This retries an
-already authorized send; it never initiates a first authorization for an
-occurrence resolved beforehand. A crash after authorization but before actual
-sink I/O may therefore require the same recovery treatment.
+Claim → durable authorization → sink outside transaction → fenced receipt/retry
+is unchanged. Expired owners cannot commit. Immediately before I/O the worker
+checks its token, server time and PTTL, subtracts round-trip time and reserves a
+state-store operation budget. The request context is capped by the lesser of the
+remaining lease and configured delivery timeout. Cancellation cannot undo a remote
+side effect. Restarted/multiple instances discover durable deadlines and expired
+claims, preserving per-sink firing-before-resolved ordering.
 
-A firing success receipt must exist before resolution authorization. A resolution
-cannot overtake the successful firing on the normal claimed path. Stable IDs
-allow downstream deduplication; duplicate logging records are acceptable. Fencing
-protects Valkey commits, not external I/O: a sink that ignores cancellation and
-continues after losing its lease may emit late duplicates, even after another
-worker has completed a later action. No Valkey transaction can atomically order
-that stale external side effect or prove whether a crashed process wrote a log.
+Index types are checked at startup and before operations. Checked EXEC results
+quarantine the namespace on command failures; readiness fails and workers stop.
+Valkey cannot roll back runtime command errors: hostile/out-of-contract type
+changes can partially commit an EXEC. Such work is never acknowledged as complete.
+Keep exclusive schema ownership and follow the fence-first administrative repair
+protocol in the [hardening guide](sla-proxy-hardening.md). Missing/wrong memberships
+and scores are repaired without rewriting unchanged source records, renewing leases
+or changing source timestamps/versions. Orphan and cross-sink index entries are removed.
 
-Ordinary sink errors retry with exponential backoff and up to 25% positive jitter
-below retry_max. At the cap, jitter uses 80–100% of the maximum, bounded below
-by retry_initial, to avoid synchronizing all capped retries. No retry count limit silently discards work. A
-`DeliveryError{Permanent: true}` creates an explicit retained failure needing
-operator intervention; no automatic redrive/migration endpoint is provided.
-Raw sink error text is neither logged nor persisted; failure fields use bounded
-classifications. Per-worker and polling backoff prevent hot loops on state-store
-outages, and a failed occurrence does not monopolize the worker pool.
+Unresolved occurrences have no automatic expiry. Resolved payloads normally compact
+30 days after resolution and tombstones expire after 90 days. Outstanding or held
+delivery, including ambiguous authorized sends and resolutions awaiting receipts,
+pins required state beyond these deadlines. Configure persistence/noeviction and
+monitor growth; tombstone expiration limits very old replay protection.
 
-The claim's remaining budget is checked before a call. Delivery timeout is passed
-through context; sinks must honor cancellation. Go cannot forcibly interrupt a
-custom logging handler or a blocking writer that ignores context. Shutdown stops
-polling, cancels workers and attempts bounded outcome persistence; the service's
-existing shutdown deadline still bounds its wait and closes the store. A process
-exit before receipt commit is recovered through the same lease/authorization path.
+For an outage, restore Valkey and restart with the same catalog/epoch: pending
+work and expired claims recover. For policy holds restore the pinned policy under
+an approved higher epoch; do not silently reinterpret the occurrence. Permanent
+HTTP failures require operator correction; this phase has no redrive/retirement
+API. Restore an accidentally changed endpoint to its registered configuration;
+changing the registry manually can redirect queued notifications and is unsupported.
 
-### Logging semantics and retention
+### Logging sink and observability
 
-A successful `log` delivery emits exactly one `SLA alert delivered` structured
-record per successful attempt. It contains component/sink type and ID, action,
-occurrence/binding/intent IDs, SLA reference/version, starts_at, eligible_at,
-optional known ends_at and authorized attempt number. Full labels, annotations
-and payloads are omitted. Retry payloads remain original Alertmanager notification
-information; enrichment is not introduced.
+The real log destination emits one `SLA alert delivered` structured record per
+successful sink call. Record time and `delivery_at` are actual sink processing
+time. `starts_at`, optional `ends_at` and `eligible_at` remain separate historical
+attributes. Intent/occurrence/binding IDs, sink, action, policy and attempt are
+included; full labels/annotations/payloads are omitted. The handler's reported
+error is honored and disabled INFO output is not successful delivery. `slog` does
+not guarantee durable log storage; a handler that hides write errors cannot prove
+persistence. Duplicate log records with the same intent ID are possible.
 
-The record's timestamp is captured at the logging sink boundary and represents
-**current delivery attempt time**, in UTC with nanosecond precision. The matching
-`delivery_at` attribute has the same value. Historical starts_at, ends_at and
-eligible_at remain separate attributes; they do not set the record timestamp.
-`SLA delivery receipt committed` is a separate current-time processing log.
-Receipt delivered_at is the observed completion time of the successful sink call;
-committed_at is the Valkey server time used for the receipt transaction. Attempt
-numbers count committed authorizations, not provable network/writer invocations.
-
-The sink calls `slog.Handler.Handle` directly to receive handler-reported write
-errors. INFO filtering is treated as a retryable failure rather than successful
-delivery. A nil handler error means only completion according to that API: standard
-stdout logging does not fsync, and custom handlers may buffer or discard output
-without returning an error. Log collection/backend persistence is not guaranteed.
-Receipts cannot make such unreported loss observable.
-
-Completed payload/tombstone retention remains 30/90 days by default **when no
-delivery is outstanding**. Pending, retrying, uncertain or permanent-failed work
-pins its occurrence and needed payload instead of silently expiring it. Retry
-snapshots are released when their success receipt commits; original payloads
-follow completed-payload retention afterwards. Normal compaction/deletion resumes
-once work is complete, using the original deadlines (so an overdue record may
-then be removed promptly). Monitor storage/held work: delivery retention can be
-unbounded during an outage or unresolved permanent failure. Tombstone expiry
-still limits protection against very old webhook replays.
-
-### Delivery observability
-
-New metrics use only configured sink IDs and bounded action/result/operation
-labels; never fingerprints, occurrence IDs, arbitrary alert labels or intent IDs:
+HTTP attempts log `SLA HTTP request completed` with sink/type, intent/occurrence/
+binding, action, attempt, status, duration and outcome. A receipt-commit log is
+separate from sink success. Failure logs omit raw sink errors.
 
 | Metric | Meaning |
 |---|---|
-| `sla_proxy_delivery_attempts_total{sink_id,action,result}` | Actual sink calls: success, temporary_failure or permanent_failure |
-| `sla_proxy_delivery_receipts_total{sink_id,action}` | Successfully observed durable success-receipt commits |
-| `sla_proxy_delivery_receipt_commits_total{result}` | Outcome persistence committed, fenced or failed; failures may be ambiguous |
-| `sla_proxy_delivery_retries_total{sink_id,action}` | Sink calls after the first authorized attempt |
-| `sla_proxy_delivery_claims_total{result}` | Claimed, busy, inactive, held, reclaimed, fenced or error outcomes |
-| `sla_proxy_delivery_errors_total{operation}` | Dispatcher dispatch/poll operational failures |
-| `sla_proxy_delivery_duration_seconds{sink_id,action}` | Individual sink call duration |
-| `sla_proxy_delivery_eligibility_delay_seconds{sink_id}` | First calendar eligibility to firing sink success, recorded after a receipt commit |
-| `sla_proxy_delivery_ready_occurrences` | Due work including expired claims eligible for recovery |
-| `sla_proxy_delivery_claimed_occurrences` | Persisted claims, including expired claims awaiting recovery |
-| `sla_proxy_delivery_held_occurrences` | Permanent delivery/preparation failures needing intervention |
+| `sla_proxy_delivery_attempts_total{sink_id,action,result}` | Calls by success/temporary_failure/permanent_failure |
+| `sla_proxy_delivery_receipts_total{sink_id,action}` | Observed successful durable receipt commits |
+| `sla_proxy_delivery_receipt_commits_total{sink_id,result}` | Committed, error or fenced outcome persistence |
+| `sla_proxy_delivery_retries_total{sink_id,action}` | Calls after first authorized attempt |
+| `sla_proxy_delivery_claims_total{sink_id,result}` | Claimed, busy, inactive, reclaimed, fenced or error |
+| `sla_proxy_delivery_errors_total{operation}` | Poll/dispatch operational errors |
+| `sla_proxy_delivery_duration_seconds{sink_id,action}` | Individual sink call latency |
+| `sla_proxy_delivery_eligibility_delay_seconds{sink_id}` | First SLA opportunity to firing success, after receipt commit |
+| `sla_proxy_delivery_pending_bindings{sink_id}` | Queued binding work, including retry-delayed work |
+| `sla_proxy_delivery_inflight_bindings{sink_id}` | Persisted claims, including expired claims awaiting recovery |
+| `sla_proxy_delivery_failed_bindings{sink_id}` | Held/permanently failed delivery bindings |
+| `sla_proxy_delivery_ready_bindings` | Due work, including expired claims |
+| `sla_proxy_delivery_claimed_bindings` | All persisted binding claims |
+| `sla_proxy_delivery_held_bindings` | All held delivery bindings |
+| `sla_proxy_http_requests_total{sink_id,status_class,result}` | HTTP API call outcomes with bounded status classes |
+| `sla_proxy_http_request_duration_seconds{sink_id}` | HTTP request plus bounded response-drain time |
 
-Gauges describe the namespace, refresh on polling and can lag until reconciliation;
-use max rather than sum across replicas. Delivery is serialized per occurrence,
-so discovery/gauge work units are occurrences with an actionable head intent,
-not a count of every future conditional intent. Counters describe the current
-process's observations and can undercount durable receipts if a successful commit
-was followed by a lost response. Valkey receipt records remain authoritative.
+Gauges are namespace-wide snapshots sampled during polling: use **max**, not sum,
+across replicas. Pending delivery gauges count prepared binding work, not alerts
+still waiting for SLA with no ready intent. Counters/histograms are process-local;
+sum replica rates as appropriate. Labels contain configured sink IDs and bounded
+outcomes, never fingerprints, URLs, usernames or alert labels. A sink success with
+an unconfirmed receipt can increment attempts without a corresponding receipt
+counter. A lost EXEC reply can also undercount actual persisted receipts.
 
-Phase 4B HTTP delivery, destination authentication, sink migration/redrive APIs,
-real enrichment and guarantees of downstream storage remain unimplemented.
-
-See [Phase 4A validation and regression measurements](sla-proxy-phase4a-validation.md)
-for executed checks, scenario coverage, benchmark methodology and raw samples.
-
-
-The [Phase 4A hardening report](sla-proxy-hardening.md) documents narrowed WATCH
-scope, corruption safety, delivery-time logging and concurrent delivery benchmarks.
+See [Phase 4B validation and benchmarks](sla-proxy-phase4b-validation.md) for measured
+results and remaining production validation. Real enrichment, routing rules,
+sink editing/redrive APIs and downstream processing guarantees remain outside scope.

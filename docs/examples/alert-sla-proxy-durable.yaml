@@ -20,8 +20,7 @@ sla_definitions:
           additional_dates: ["2027-12-24"]
 durable:
   enabled: true
-  policy_epoch: 1 # Increase when changing the policy catalog or logical sink ID.
-  sink_id: default # Logical Phase 4 target only, not a downstream URL.
+  policy_epoch: 1 # Increase for approved policy changes, sink additions or enable/disable.
   valkey:
     address: "127.0.0.1:6379"
     username: ""
@@ -41,3 +40,9 @@ durable:
   retention:
     completed_payload: 720h # 30 days after first durable resolution receipt.
     tombstone: 2160h       # 90 days after first durable resolution receipt.
+
+delivery:
+  enabled: false
+  sinks:
+    - id: default
+      type: log

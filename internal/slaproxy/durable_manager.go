@@ -54,7 +54,7 @@ func (m *DurableManager) accept(ctx context.Context, a models.Alert, payload mod
 	if existing != nil {
 		refs = nil
 		for _, b := range existing.Bindings {
-			refs = append(refs, b.Policy)
+			refs = appendPolicyOnce(refs, b.Policy)
 		}
 	}
 	if existing == nil && selection != "selected" {
@@ -70,15 +70,17 @@ func (m *DurableManager) accept(ctx context.Context, a models.Alert, payload mod
 			if selection != "selected" {
 				return nil, fmt.Errorf("occurrence disappeared during resolution acceptance")
 			}
-			d, err := m.engine.Evaluate(ctx, PolicyInput{Alert: a}, ref, m.cfg.Durable.SinkID, a.StartsAt)
+			d, err := m.engine.Evaluate(ctx, PolicyInput{Alert: a}, ref, "", a.StartsAt)
 			if err != nil {
 				m.store.metrics.policyErrors.WithLabelValues(evaluationErrorReason(err)).Inc()
 				return nil, err
 			}
-			bid := bindingKeyID(id, ref, m.cfg.Durable.SinkID)
-			row = &DurableOccurrence{ID: id, Fingerprint: a.Fingerprint, StartsAt: a.StartsAt.UTC(), Lifecycle: LifecycleFiring,
-				Original: notification(a, payload), CreatedAt: now, Bindings: map[string]*DurableBinding{bid: {ID: bid, Policy: ref, SinkID: m.cfg.Durable.SinkID,
-					PolicyVersion: d.PolicyVersion, Calendar: d, Eligibility: EligibilityUnknown, Delivery: NotDelivered, Intents: map[string]*DeliveryIntent{}}}}
+			bindings := make(map[string]*DurableBinding, len(m.cfg.Delivery.Sinks))
+			for _, sink := range m.cfg.Delivery.Sinks {
+				bid := bindingKeyID(id, ref, sink.ID)
+				bindings[bid] = &DurableBinding{ID: bid, SinkID: sink.ID, SinkType: sink.Type, DestinationFingerprint: sink.fingerprint(), Policy: ref, PolicyVersion: d.PolicyVersion, Calendar: d, Eligibility: EligibilityUnknown, Delivery: NotDelivered, Intents: map[string]*DeliveryIntent{}}
+			}
+			row = &DurableOccurrence{FormatVersion: occurrenceFormatVersion, ID: id, Fingerprint: a.Fingerprint, StartsAt: a.StartsAt.UTC(), Lifecycle: LifecycleFiring, Original: notification(a, payload), CreatedAt: now, Bindings: bindings}
 		}
 		if row.Fingerprint != a.Fingerprint || !row.StartsAt.Equal(a.StartsAt) {
 			return nil, fmt.Errorf("occurrence identity mismatch")
@@ -108,7 +110,7 @@ func (m *DurableManager) accept(ctx context.Context, a models.Alert, payload mod
 	m.logTransition(before, row, "webhook")
 	refs = nil
 	for _, b := range row.Bindings {
-		refs = append(refs, b.Policy)
+		refs = appendPolicyOnce(refs, b.Policy)
 	}
 	return Acceptance{Occurrence: row, Policies: refs}, nil
 }
@@ -189,8 +191,8 @@ func (m *DurableManager) syncPolicies(row *DurableOccurrence, now time.Time) {
 		} else if policy.version != b.PolicyVersion {
 			b.HoldReason = "policy_changed"
 		}
-		if b.SinkID != m.cfg.Durable.SinkID {
-			b.HoldReason = "sink_changed"
+		if sink, exists := m.cfg.sinkConfig(b.SinkID); !exists || sink.fingerprint() != b.DestinationFingerprint {
+			b.HoldReason = "destination_changed"
 		}
 		if row.ResolutionConflict {
 			b.HoldReason = "resolution_conflict"
@@ -274,4 +276,13 @@ func (m *DurableManager) logTransition(before, after *DurableOccurrence, reason 
 			"lifecycle", after.Lifecycle, "eligibility", b.Eligibility, "delivery", b.Delivery, "hold_reason", b.HoldReason,
 			"next_evaluation_at", b.NextEvaluationAt, "state_version", after.Version)
 	}
+}
+
+func appendPolicyOnce(refs []PolicyRef, ref PolicyRef) []PolicyRef {
+	for _, existing := range refs {
+		if existing == ref {
+			return refs
+		}
+	}
+	return append(refs, ref)
 }

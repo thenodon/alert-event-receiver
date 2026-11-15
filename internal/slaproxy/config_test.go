@@ -208,8 +208,8 @@ func TestDurableDefaultsAndValidation(t *testing.T) {
 		t.Fatal(c.Durable.Retention)
 	}
 	for name, mutate := range map[string]func(*DurableConfig){
-		"epoch":     func(c *DurableConfig) { c.PolicyEpoch = 0 },
-		"sink":      func(c *DurableConfig) { c.SinkID = "" },
+		"epoch": func(c *DurableConfig) { c.PolicyEpoch = 0 },
+
 		"address":   func(c *DurableConfig) { c.Valkey.Address = "invalid" },
 		"namespace": func(c *DurableConfig) { c.Valkey.Namespace = "bad:*" },
 		"database":  func(c *DurableConfig) { c.Valkey.Database = -1 },
@@ -241,8 +241,8 @@ func TestDurableDimensionsAndLateResolution(t *testing.T) {
 	m := &DurableManager{cfg: cfg, engine: engineFor(t, businessPolicy(), 370)}
 	start := instant(t, "2026-11-09T07:30:00+01:00")
 	first := instant(t, "2026-11-09T08:00:00+01:00")
-	b := &DurableBinding{ID: "binding", SinkID: cfg.Durable.SinkID, Policy: PolicyRef{"sla_id", "business"}, PolicyVersion: m.engine.policies[PolicyRef{"sla_id", "business"}].version, Calendar: Decision{NextEvaluationAt: first}, Intents: map[string]*DeliveryIntent{}, Delivery: NotDelivered}
-	row := &DurableOccurrence{ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
+	b := &DurableBinding{ID: "binding", SinkID: cfg.Delivery.Sinks[0].ID, SinkType: cfg.Delivery.Sinks[0].Type, DestinationFingerprint: cfg.Delivery.Sinks[0].fingerprint(), Policy: PolicyRef{"sla_id", "business"}, PolicyVersion: m.engine.policies[PolicyRef{"sla_id", "business"}].version, Calendar: Decision{NextEvaluationAt: first}, Intents: map[string]*DeliveryIntent{}, Delivery: NotDelivered}
+	row := &DurableOccurrence{FormatVersion: occurrenceFormatVersion, ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
 	m.advance(row, start.Add(time.Minute))
 	if b.Eligibility != EligibilityPending || row.Lifecycle != LifecycleFiring || b.Delivery != NotDelivered {
 		t.Fatal(row, b)
@@ -286,8 +286,8 @@ func TestDurableSLAOpportunities(t *testing.T) {
 			if err != nil || d.NextEvaluationAt.IsZero() {
 				t.Fatal(d, err)
 			}
-			b := &DurableBinding{ID: "binding", Policy: ref, SinkID: cfg.Durable.SinkID, PolicyVersion: d.PolicyVersion, Calendar: d, Intents: map[string]*DeliveryIntent{}}
-			row := &DurableOccurrence{ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
+			b := &DurableBinding{ID: "binding", Policy: ref, SinkID: cfg.Delivery.Sinks[0].ID, SinkType: cfg.Delivery.Sinks[0].Type, DestinationFingerprint: cfg.Delivery.Sinks[0].fingerprint(), PolicyVersion: d.PolicyVersion, Calendar: d, Intents: map[string]*DeliveryIntent{}}
+			row := &DurableOccurrence{FormatVersion: occurrenceFormatVersion, ID: "occurrence", StartsAt: start, Lifecycle: LifecycleFiring, Bindings: map[string]*DurableBinding{b.ID: b}}
 			m.advance(row, start)
 			if b.Eligibility != EligibilityPending || !b.NextEvaluationAt.Equal(d.NextEvaluationAt) {
 				t.Fatal(b)

@@ -7,66 +7,67 @@ import (
 	"errors"
 	"math"
 	mathrand "math/rand/v2"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 )
 
 type DeliveryDispatcher struct {
 	manager *DurableManager
-	sink    Sink
+	sinks   map[string]Sink
 	metrics *deliveryMetrics
 }
 
 func (d *DeliveryDispatcher) operation(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, d.manager.cfg.Durable.Scheduler.OperationTimeout)
 }
-func (d *DeliveryDispatcher) claim(ctx context.Context, id string) (*DurableOccurrence, error) {
+func (d *DeliveryDispatcher) claim(ctx context.Context, work string) (*DurableOccurrence, error) {
+	id, bid, valid := parseDeliveryWork(work)
+	if !valid {
+		return nil, ErrClaimBusy
+	}
 	var token [16]byte
 	if _, err := rand.Read(token[:]); err != nil {
 		return nil, err
 	}
 	m := d.manager
 	reclaimed := false
-	row, err := m.store.reconcile(ctx, id, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
-		if row == nil {
+	sinkID := "unknown"
+	row, err := m.store.claimBinding(ctx, id, bid, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
+		if row == nil || row.Bindings[bid] == nil {
 			return nil, ErrClaimBusy
 		}
-		if row.DeliveryClaim != nil && row.DeliveryClaim.Until.After(now) {
+		b := row.Bindings[bid]
+		sinkID = b.SinkID
+		if b.Claim != nil && b.Claim.Until.After(now) {
 			return nil, ErrClaimBusy
 		}
-		reclaimed = row.DeliveryClaim != nil
-		row.DeliveryClaim = nil
+		reclaimed = b.Claim != nil
+		b.Claim = nil
 		m.syncPolicies(row, now)
 		m.refreshDelivery(row)
-		ids := make([]string, 0, len(row.Bindings))
-		for bid := range row.Bindings {
-			ids = append(ids, bid)
-		}
-		sort.Strings(ids)
-		for _, bid := range ids {
-			b := row.Bindings[bid]
-			for _, action := range []string{"firing", "resolved"} {
-				i := b.Intents[action]
-				if !deliveryActionable(row, b, i) || i.NextAttemptAt.After(now) {
-					continue
-				}
-				if b.SinkID != m.cfg.Durable.SinkID || b.SinkType != m.cfg.Delivery.Sink.Type {
-					i.PermanentFailure = true
-					i.LastFailure = "sink_identity_mismatch"
-					m.refreshDelivery(row)
-					return row, nil
-				}
-				if row.DeliveryFence == math.MaxUint64 {
-					return nil, errors.New("delivery fence exhausted")
-				}
-				row.DeliveryFence++
-				row.DeliveryClaim = &DeliveryClaim{Token: hex.EncodeToString(token[:]), Fence: row.DeliveryFence, BindingID: bid, IntentID: i.ID, Action: action, Until: now.Add(m.cfg.Delivery.Dispatcher.ClaimLease)}
+		for _, action := range []string{"firing", "resolved"} {
+			i := b.Intents[action]
+			if !deliveryActionable(row, b, i) || i.NextAttemptAt.After(now) {
+				continue
+			}
+			cfg, found := m.cfg.sinkConfig(b.SinkID)
+			if !found || cfg.fingerprint() != b.DestinationFingerprint || d.sinks[b.SinkID] == nil {
+				i.PermanentFailure = true
+				i.LastFailure = "sink_identity_mismatch"
+				m.refreshDelivery(row)
 				return row, nil
 			}
+			if b.DeliveryFence == math.MaxUint64 {
+				return nil, errors.New("delivery fence exhausted")
+			}
+			b.DeliveryFence++
+			b.Claim = &DeliveryClaim{Token: hex.EncodeToString(token[:]), Fence: b.DeliveryFence, BindingID: bid, IntentID: i.ID, Action: action, Until: now.Add(m.cfg.Delivery.Dispatcher.ClaimLease)}
+			return row, nil
 		}
-		// Cancel obsolete/held work and remove a stale discovery index atomically.
 		return row, nil
 	})
 	result := "claimed"
@@ -74,42 +75,32 @@ func (d *DeliveryDispatcher) claim(ctx context.Context, id string) (*DurableOccu
 		result = "busy"
 	} else if err != nil {
 		result = "error"
-	} else if row == nil || row.DeliveryClaim == nil {
+	} else if row == nil || row.Bindings[bid].Claim == nil {
 		result = "inactive"
 	} else if reclaimed {
 		result = "reclaimed"
 	}
-	if err == nil && row != nil && row.DeliveryClaim == nil {
-		for _, b := range row.Bindings {
-			for _, i := range b.Intents {
-				if i.PermanentFailure {
-					result = "held"
-					m.logger.Warn("SLA delivery held", "component", "sla_delivery", "operation", "prepare", "occurrence_id", row.ID, "intent_id", i.ID, "reason", i.LastFailure)
-				}
-			}
-		}
-	}
-	d.metrics.claims.WithLabelValues(result).Inc()
+	d.metrics.claims.WithLabelValues(sinkID, result).Inc()
 	return row, err
 }
 
 // authorize is the send linearization point. Only a committed authorization may
 // reach the sink. It is separate from claiming so resolution can cancel queued
 // work while another worker is waiting to validate it.
-func (d *DeliveryDispatcher) authorize(ctx context.Context, claimed *DurableOccurrence) (*DurableOccurrence, error) {
+func (d *DeliveryDispatcher) authorize(ctx context.Context, claimed *DurableOccurrence, bid string) (*DurableOccurrence, error) {
 	m := d.manager
-	c := claimed.DeliveryClaim
+	c := claimed.Bindings[bid].Claim
 	return m.store.updateDelivery(ctx, claimed.ID, c, func(row *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
 		m.syncPolicies(row, now)
 		m.refreshDelivery(row)
 		b := row.Bindings[c.BindingID]
 		i := b.Intents[c.Action]
 		if !deliveryActionable(row, b, i) {
-			row.DeliveryClaim = nil
+			b.Claim = nil
 			return row, nil
 		}
-		if row.DeliveryClaim.Until.Sub(now) < m.cfg.Delivery.Dispatcher.DeliveryTimeout+2*m.cfg.Durable.Scheduler.OperationTimeout {
-			row.DeliveryClaim = nil
+		if b.Claim.Until.Sub(now) < m.cfg.Delivery.Dispatcher.DeliveryTimeout+2*m.cfg.Durable.Scheduler.OperationTimeout {
+			b.Claim = nil
 			i.NextAttemptAt = now.Add(m.cfg.Delivery.Dispatcher.RetryInitial)
 			return row, nil
 		}
@@ -129,7 +120,7 @@ func (d *DeliveryDispatcher) authorize(ctx context.Context, claimed *DurableOccu
 		if i.Payload == nil {
 			i.PermanentFailure = true
 			i.LastFailure = "payload_unavailable"
-			row.DeliveryClaim = nil
+			b.Claim = nil
 			m.refreshDelivery(row)
 			return row, nil
 		}
@@ -137,12 +128,12 @@ func (d *DeliveryDispatcher) authorize(ctx context.Context, claimed *DurableOccu
 		if i.AuthorizedAt == nil {
 			i.AuthorizedAt = utcPointer(now)
 		}
-		row.DeliveryClaim.Sending = true
+		b.Claim.Sending = true
 		return row, nil
 	})
 }
-func deliveryEvent(row *DurableOccurrence) DeliveryEvent {
-	c := row.DeliveryClaim
+func deliveryEvent(row *DurableOccurrence, bid string) DeliveryEvent {
+	c := row.Bindings[bid].Claim
 	b := row.Bindings[c.BindingID]
 	i := b.Intents[c.Action]
 	return DeliveryEvent{IntentID: i.ID, OccurrenceID: row.ID, BindingID: b.ID, SinkID: b.SinkID, Action: i.Action, Policy: b.Policy, PolicyVersion: b.PolicyVersion,
@@ -181,14 +172,14 @@ func deliveryRetryDelay(initial, maximum time.Duration, attempt uint64, jitter f
 
 func (d *DeliveryDispatcher) finish(ctx context.Context, row *DurableOccurrence, e DeliveryEvent, sinkErr error, deliveredAt time.Time) error {
 	m := d.manager
-	c := row.DeliveryClaim
+	c := row.Bindings[e.BindingID].Claim
 	_, err := m.store.updateDelivery(ctx, row.ID, c, func(latest *DurableOccurrence, now time.Time) (*DurableOccurrence, error) {
-		if !latest.DeliveryClaim.Sending {
+		if !latest.Bindings[c.BindingID].Claim.Sending {
 			return nil, ErrFenced
 		}
 		b := latest.Bindings[c.BindingID]
 		i := b.Intents[c.Action]
-		latest.DeliveryClaim = nil
+		b.Claim = nil
 		if sinkErr == nil {
 			i.Receipt = &DeliveryReceipt{IntentID: i.ID, SinkID: b.SinkID, DeliveredAt: deliveredAt, CommittedAt: now, Attempts: i.Attempts, Fence: c.Fence, StateVersion: latest.Version + 1, Status: Delivered}
 			i.Ready = false
@@ -202,7 +193,12 @@ func (d *DeliveryDispatcher) finish(ctx context.Context, row *DurableOccurrence,
 		} else {
 			i.LastFailure = deliveryFailure(sinkErr)
 			i.PermanentFailure = i.LastFailure == "permanent_failure"
-			i.NextAttemptAt = now.Add(d.retryDelay(i.Attempts))
+			delay := d.retryDelay(i.Attempts)
+			var failure *DeliveryError
+			if errors.As(sinkErr, &failure) {
+				delay = max(delay, failure.RetryAfter)
+			}
+			i.NextAttemptAt = now.Add(delay)
 		}
 		// Read/merge the latest resolution, never the pre-send snapshot. This creates
 		// the ordered resolution intent when firing succeeded during a resolve race.
@@ -212,11 +208,11 @@ func (d *DeliveryDispatcher) finish(ctx context.Context, row *DurableOccurrence,
 	result := "committed"
 	if errors.Is(err, ErrFenced) {
 		result = "fenced"
-		d.metrics.claims.WithLabelValues("fenced").Inc()
+		d.metrics.claims.WithLabelValues(e.SinkID, "fenced").Inc()
 	} else if err != nil {
 		result = "error"
 	}
-	d.metrics.commits.WithLabelValues(result).Inc()
+	d.metrics.commits.WithLabelValues(e.SinkID, result).Inc()
 	if err == nil && sinkErr == nil {
 		d.metrics.receipts.WithLabelValues(e.SinkID, e.Action).Inc()
 		if e.Action == "firing" {
@@ -227,6 +223,10 @@ func (d *DeliveryDispatcher) finish(ctx context.Context, row *DurableOccurrence,
 	return err
 }
 func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
+	_, bid, valid := parseDeliveryWork(id)
+	if !valid {
+		return d.manager.store.cleanOrphan(ctx, "delivery-due", id)
+	}
 	op, stop := d.operation(ctx)
 	claimed, err := d.claim(op, id)
 	stop()
@@ -236,23 +236,23 @@ func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if claimed == nil || claimed.DeliveryClaim == nil {
+	if claimed == nil || claimed.Bindings[bid].Claim == nil {
 		return nil
 	}
 	op, stop = d.operation(ctx)
-	authorized, err := d.authorize(op, claimed)
+	authorized, err := d.authorize(op, claimed, bid)
 	stop()
 	if errors.Is(err, ErrFenced) {
-		d.metrics.claims.WithLabelValues("fenced").Inc()
+		d.metrics.claims.WithLabelValues(claimed.Bindings[bid].SinkID, "fenced").Inc()
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	if authorized == nil || authorized.DeliveryClaim == nil {
+	if authorized == nil || authorized.Bindings[bid].Claim == nil {
 		return nil
 	}
-	event := deliveryEvent(authorized)
+	event := deliveryEvent(authorized, bid)
 	if event.Attempt > 1 {
 		d.metrics.retries.WithLabelValues(event.SinkID, event.Action).Inc()
 	}
@@ -260,9 +260,15 @@ func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
 	if d.manager.store.quarantined.Load() {
 		return ErrIndexSchema
 	}
-	call, stopCall := context.WithTimeout(ctx, d.manager.cfg.Delivery.Dispatcher.DeliveryTimeout)
+	op, stop = d.operation(ctx)
+	budget, err := d.remainingLease(op, authorized.ID, authorized.Bindings[bid].Claim)
+	stop()
+	if err != nil {
+		return err
+	}
+	call, stopCall := context.WithTimeout(ctx, budget)
 	began := time.Now()
-	sinkErr := d.sink.Deliver(call, event)
+	sinkErr := d.sinks[event.SinkID].Deliver(call, event)
 	deliveredAt := time.Now().UTC()
 	stopCall()
 	d.metrics.duration.WithLabelValues(event.SinkID, event.Action).Observe(time.Since(began).Seconds())
@@ -272,7 +278,7 @@ func (d *DeliveryDispatcher) runOne(ctx context.Context, id string) error {
 	}
 	d.metrics.attempts.WithLabelValues(event.SinkID, event.Action, result).Inc()
 	if sinkErr != nil {
-		d.manager.logger.Warn("SLA sink delivery failed", "component", "sla_delivery", "operation", "deliver", "intent_id", event.IntentID, "sink_id", event.SinkID, "action", event.Action, "result", result, "delivery_attempt", event.Attempt)
+		d.manager.logger.Warn("SLA sink delivery failed", "component", "sla_delivery", "operation", "deliver", "intent_id", event.IntentID, "sink_id", event.SinkID, "action", event.Action, "sink_type", authorized.Bindings[bid].SinkType, "result", result, "delivery_attempt", event.Attempt)
 	}
 	// A completed sink operation may still commit during bounded shutdown.
 	op, stop = d.operation(context.WithoutCancel(ctx))
@@ -313,6 +319,19 @@ func (d *DeliveryDispatcher) poll(ctx context.Context) (ids []string, err error)
 		return nil, err
 	}
 	d.metrics.held.Set(float64(count))
+	for _, sink := range d.manager.cfg.Delivery.Sinks {
+		for _, entry := range []struct {
+			prefix string
+			gauge  *prometheus.GaugeVec
+		}{{"delivery-pending:", d.metrics.pendingBySink}, {"delivery-inflight:", d.metrics.inflightBySink}, {"delivery-failed:", d.metrics.heldBySink}} {
+			n, err := s.client.SCard(ctx, s.key(entry.prefix+sink.ID)).Result()
+			if err != nil {
+				return nil, err
+			}
+			entry.gauge.WithLabelValues(sink.ID).Set(float64(n))
+		}
+	}
+
 	return ids, nil
 }
 
@@ -393,4 +412,40 @@ func (d *DeliveryDispatcher) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// Check both the token and server-clock lease immediately before external I/O.
+// Subtract round-trip time and reserve one state-store operation for the receipt.
+func (d *DeliveryDispatcher) remainingLease(ctx context.Context, id string, claim *DeliveryClaim) (time.Duration, error) {
+	s := d.manager.store
+	began := time.Now()
+	var token *redis.StringCmd
+	var ttl *redis.DurationCmd
+	var now *redis.TimeCmd
+	_, err := s.client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		token = p.Get(ctx, s.deliveryClaimKey(id, claim.BindingID))
+		ttl = p.PTTL(ctx, s.deliveryClaimKey(id, claim.BindingID))
+		now = p.Time(ctx)
+		return nil
+	})
+	if err != nil && err != redis.Nil {
+		return 0, s.readError(ctx, err)
+	}
+	value, err := token.Result()
+	if err != nil && err != redis.Nil {
+		return 0, err
+	}
+	remaining, err := ttl.Result()
+	if err != nil {
+		return 0, err
+	}
+	serverNow, err := now.Result()
+	if err != nil {
+		return 0, err
+	}
+	remaining = min(remaining, claim.Until.Sub(serverNow)) - time.Since(began) - s.cfg.Scheduler.OperationTimeout
+	if value != claim.Token || remaining <= 0 {
+		return 0, ErrFenced
+	}
+	return min(remaining, d.manager.cfg.Delivery.Dispatcher.DeliveryTimeout), nil
 }

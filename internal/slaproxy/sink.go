@@ -33,8 +33,10 @@ type DeliveryEvent struct {
 // message/cause, because a transport or handler error may contain secrets.
 // Ordinary errors are retryable; permanent errors require operator intervention.
 type DeliveryError struct {
-	Permanent bool
-	Cause     error
+	Permanent  bool
+	HTTPStatus int
+	RetryAfter time.Duration
+	Cause      error
 }
 
 func (e *DeliveryError) Error() string { return "sink delivery failed" }

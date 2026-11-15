@@ -20,18 +20,19 @@ import (
 // Service owns an independent configuration, registry and HTTP lifecycle.
 // Receiver processing/telemetry are independent. Valkey is used only when durable processing is enabled.
 type Service struct {
-	cfg        Config
-	logger     *slog.Logger
-	metrics    *metrics
-	enricher   NoopEnricher
-	evaluator  PolicyEvaluator
-	now        func() time.Time
-	ready      atomic.Bool
-	handler    http.Handler
-	durable    *DurableManager
-	dispatcher *DeliveryDispatcher
-	closeOnce  sync.Once
-	closeErr   error
+	cfg           Config
+	logger        *slog.Logger
+	metrics       *metrics
+	enricher      NoopEnricher
+	evaluator     PolicyEvaluator
+	now           func() time.Time
+	ready         atomic.Bool
+	handler       http.Handler
+	durable       *DurableManager
+	dispatcher    *DeliveryDispatcher
+	httpTransport *http.Transport
+	closeOnce     sync.Once
+	closeErr      error
 }
 
 func New(cfg Config, logger *slog.Logger) (*Service, error) {
@@ -42,6 +43,25 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		return nil, fmt.Errorf("logger is required")
 	}
 	s := &Service{cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
+	sinks := make(map[string]Sink, len(cfg.Delivery.Sinks))
+	var httpClient *http.Client
+	for _, destination := range cfg.Delivery.Sinks {
+		if destination.Type == "log" {
+			sinks[destination.ID] = LogSink{Handler: logger.Handler()}
+			continue
+		}
+		if httpClient == nil {
+			httpClient, s.httpTransport = newDeliveryHTTPClient(cfg.Delivery.Dispatcher.Workers)
+		}
+		sink, err := newHTTPSink(*destination.HTTP, httpClient, logger, s.metrics.delivery)
+		if err != nil {
+			if s.httpTransport != nil {
+				s.httpTransport.CloseIdleConnections()
+			}
+			return nil, fmt.Errorf("configure sink %s: %w", destination.ID, err)
+		}
+		sinks[destination.ID] = sink
+	}
 	engine, err := NewCalendarEngine(cfg, observedHolidays{provider: CountryHolidays{}, metrics: s.metrics})
 	if err != nil {
 		return nil, err
@@ -71,9 +91,6 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 			if err == nil {
 				err = store.activate(ctx)
 			}
-			if err == nil && cfg.Delivery.Enabled {
-				err = store.activateSink(ctx)
-			}
 		}
 		cancel()
 		if err != nil {
@@ -82,7 +99,7 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		}
 		s.durable = &DurableManager{store: store, engine: engine, cfg: cfg, logger: logger}
 		if cfg.Delivery.Enabled {
-			s.dispatcher = &DeliveryDispatcher{manager: s.durable, sink: LogSink{Handler: logger.Handler()}, metrics: s.metrics.delivery}
+			s.dispatcher = &DeliveryDispatcher{manager: s.durable, sinks: sinks, metrics: s.metrics.delivery}
 		}
 	}
 	s.ready.Store(true)
@@ -125,6 +142,9 @@ func (s *Service) mode() string {
 }
 func (s *Service) Close() error {
 	s.closeOnce.Do(func() {
+		if s.httpTransport != nil {
+			s.httpTransport.CloseIdleConnections()
+		}
 		if s.durable != nil {
 			s.closeErr = s.durable.store.client.Close()
 		}

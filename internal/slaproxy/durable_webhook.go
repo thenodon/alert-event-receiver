@@ -70,8 +70,13 @@ func (s *Service) durableWebhook(w http.ResponseWriter, r *http.Request, payload
 		row := accepted.Occurrence
 		result.PersistedCount++
 		summary := DurableSummary{OccurrenceID: row.ID, Fingerprint: row.Fingerprint, StartsAt: row.StartsAt, Lifecycle: row.Lifecycle, EndsAt: row.EndsAt, Version: row.Version, Bindings: []BindingSummary{}}
+		observedPolicies := make(map[PolicyRef]bool)
 		for _, b := range row.Bindings {
 			summary.Bindings = append(summary.Bindings, BindingSummary{b.Policy.SLALabel, b.Policy.SLAValue, b.SinkID, b.PolicyVersion, b.Eligibility, b.Delivery, b.HoldReason, utcPointer(b.NextEvaluationAt)})
+			if observedPolicies[b.Policy] {
+				continue
+			}
+			observedPolicies[b.Policy] = true
 			// Preserve Phase 2 metrics as notification evidence observations,
 			// distinct from the durable webhook-authoritative lifecycle state.
 			classification := "outside_sla"

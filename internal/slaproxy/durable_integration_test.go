@@ -141,17 +141,23 @@ func pendingSnapshot(t testing.TB, m *DurableManager) *DurableOccurrence {
 		t.Fatal(err)
 	}
 	id := occurrenceKeyID(a)
-	bid := bindingKeyID(id, ref, m.cfg.Durable.SinkID)
-	row := &DurableOccurrence{ID: id, Fingerprint: a.Fingerprint, StartsAt: a.StartsAt.UTC(), Lifecycle: LifecycleFiring,
+	bindings := make(map[string]*DurableBinding)
+	for _, sink := range m.cfg.Delivery.Sinks {
+		bid := bindingKeyID(id, ref, sink.ID)
+		bindings[bid] = &DurableBinding{ID: bid, Policy: ref, SinkID: sink.ID, SinkType: sink.Type, DestinationFingerprint: sink.fingerprint(), PolicyVersion: d.PolicyVersion, Calendar: d, Intents: map[string]*DeliveryIntent{}, Delivery: NotDelivered}
+	}
+	row := &DurableOccurrence{FormatVersion: occurrenceFormatVersion, ID: id, Fingerprint: a.Fingerprint, StartsAt: a.StartsAt.UTC(), Lifecycle: LifecycleFiring,
 		Original: notification(a, modelsPayload(a)), LastFiring: notification(a, modelsPayload(a)), CreatedAt: a.StartsAt.UTC(),
-		Bindings: map[string]*DurableBinding{bid: {ID: bid, Policy: ref, SinkID: m.cfg.Durable.SinkID, PolicyVersion: d.PolicyVersion, Calendar: d, Intents: map[string]*DeliveryIntent{}, Delivery: NotDelivered}}}
+		Bindings: bindings}
 	m.advance(row, a.StartsAt.Add(5*time.Minute))
 	committed, err := m.store.update(context.Background(), id, func(*DurableOccurrence, time.Time) (*DurableOccurrence, error) { return row, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if onlyBinding(t, committed).Eligibility != EligibilityPending {
-		t.Fatal("bad pending fixture")
+	for _, binding := range committed.Bindings {
+		if binding.Eligibility != EligibilityPending {
+			t.Fatal("bad pending fixture")
+		}
 	}
 	return committed
 }
@@ -748,4 +754,10 @@ func TestValkeyRacingIndexCorruptionQuarantinesPartialCommit(t *testing.T) {
 	if _, err := New(m.cfg, slog.New(slog.NewJSONHandler(io.Discard, nil))); !errors.Is(err, ErrIndexSchema) {
 		t.Fatal("restart bypassed quarantine", err)
 	}
+}
+
+// Work IDs for the common single-log test fixture; multi-sink tests use the
+// actual frozen binding ID instead of inferring a binding from this fixture.
+func testDeliveryWork(id string) string {
+	return deliveryWorkID(id, bindingKeyID(id, PolicyRef{"sla_id", "business"}, "default"))
 }

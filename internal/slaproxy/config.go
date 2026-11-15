@@ -2,6 +2,7 @@
 package slaproxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -180,7 +181,6 @@ func clockMinutes(s string, allowEndOfDay bool) (int, error) {
 type DurableConfig struct {
 	Enabled     bool   `yaml:"enabled"`
 	PolicyEpoch uint64 `yaml:"policy_epoch"`
-	SinkID      string `yaml:"sink_id"`
 	Valkey      struct {
 		Address     string `yaml:"address"`
 		Username    string `yaml:"username"`
@@ -207,7 +207,7 @@ type DurableConfig struct {
 
 func defaultDurableConfig() DurableConfig {
 	var c DurableConfig
-	c.PolicyEpoch, c.SinkID = 1, "default"
+	c.PolicyEpoch = 1
 	c.Valkey.Address, c.Valkey.Namespace = "localhost:6379", "sla"
 	c.Scheduler.PollInterval, c.Scheduler.Workers, c.Scheduler.BatchSize = time.Second, 4, 100
 	c.Scheduler.LeaseDuration, c.Scheduler.OperationTimeout = 30*time.Second, 5*time.Second
@@ -220,8 +220,8 @@ func (c DurableConfig) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
-	if c.PolicyEpoch == 0 || c.SinkID == "" || len(c.SinkID) > 128 {
-		return fmt.Errorf("durable requires positive policy_epoch and nonempty sink_id (max 128 bytes)")
+	if c.PolicyEpoch == 0 {
+		return fmt.Errorf("durable requires positive policy_epoch")
 	}
 	_, port, err := net.SplitHostPort(c.Valkey.Address)
 	if err != nil {
@@ -250,12 +250,10 @@ func (c DurableConfig) Validate() error {
 	return nil
 }
 
-// DeliveryConfig enables a concrete sink independently of durable acceptance.
+// DeliveryConfig names independent destinations and enables durable dispatch.
 type DeliveryConfig struct {
-	Enabled bool `yaml:"enabled"`
-	Sink    struct {
-		Type string `yaml:"type"`
-	} `yaml:"sink"`
+	Enabled    bool         `yaml:"enabled"`
+	Sinks      []SinkConfig `yaml:"sinks"`
 	Dispatcher struct {
 		PollInterval    time.Duration `yaml:"poll_interval"`
 		Workers         int           `yaml:"workers"`
@@ -269,7 +267,7 @@ type DeliveryConfig struct {
 
 func defaultDeliveryConfig() DeliveryConfig {
 	var c DeliveryConfig
-	c.Sink.Type = "log"
+	c.Sinks = []SinkConfig{{ID: "default", Type: "log"}}
 	c.Dispatcher.PollInterval = time.Second
 	c.Dispatcher.Workers, c.Dispatcher.BatchSize = 4, 100
 	c.Dispatcher.ClaimLease, c.Dispatcher.DeliveryTimeout = 30*time.Second, 10*time.Second
@@ -277,14 +275,24 @@ func defaultDeliveryConfig() DeliveryConfig {
 	return c
 }
 func (c DeliveryConfig) Validate(d DurableConfig) error {
+	if (d.Enabled || c.Enabled) && (len(c.Sinks) == 0 || len(c.Sinks) > 32) {
+		return fmt.Errorf("delivery.sinks requires 1 through 32 named sinks")
+	}
+	seen := make(map[string]bool)
+	for _, sink := range c.Sinks {
+		if !sinkIDPattern.MatchString(sink.ID) || seen[sink.ID] {
+			return fmt.Errorf("sink IDs must be unique, nonempty ASCII identifiers (max 128 bytes)")
+		}
+		seen[sink.ID] = true
+		if err := sink.Validate(c.Dispatcher.DeliveryTimeout); err != nil {
+			return fmt.Errorf("sink %s: %w", sink.ID, err)
+		}
+	}
 	if !c.Enabled {
 		return nil
 	}
 	if !d.Enabled {
 		return fmt.Errorf("delivery requires durable.enabled")
-	}
-	if c.Sink.Type != "log" {
-		return fmt.Errorf("delivery.sink.type must be log")
 	}
 	x := c.Dispatcher
 	if x.PollInterval < 10*time.Millisecond || x.PollInterval > time.Minute || x.Workers < 1 || x.Workers > 64 || x.BatchSize < 1 || x.BatchSize > 1000 {
@@ -297,4 +305,80 @@ func (c DeliveryConfig) Validate(d DurableConfig) error {
 		return fmt.Errorf("invalid delivery retry durations")
 	}
 	return nil
+}
+
+// SinkConfig names a stable destination. Fingerprints intentionally exclude
+// credential values, allowing secret rotation without redirecting a destination.
+type SinkConfig struct {
+	ID   string          `yaml:"id"`
+	Type string          `yaml:"type"`
+	HTTP *HTTPSinkConfig `yaml:"http,omitempty"`
+}
+type HTTPSinkConfig struct {
+	URL       string        `yaml:"url"`
+	Timeout   time.Duration `yaml:"timeout"`
+	BasicAuth struct {
+		UsernameEnv string `yaml:"username_env"`
+		PasswordEnv string `yaml:"password_env"`
+	} `yaml:"basic_auth"`
+	IdempotencyKey *bool `yaml:"idempotency_key,omitempty"`
+}
+
+var sinkIDPattern = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+func (c SinkConfig) Validate(maximum time.Duration) error {
+	switch c.Type {
+	case "log":
+		if c.HTTP != nil {
+			return fmt.Errorf("log sink must not have HTTP settings")
+		}
+	case "http":
+		if c.HTTP == nil {
+			return fmt.Errorf("http settings are required")
+		}
+		u, err := url.Parse(c.HTTP.URL)
+		if err != nil || u == nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" || strings.ContainsAny(c.HTTP.URL, " \t\r\n") || strings.HasSuffix(u.Host, ":") {
+			return fmt.Errorf("invalid HTTP URL: require http/https, host, no userinfo or fragment")
+		}
+		if port := u.Port(); port != "" {
+			n, err := strconv.Atoi(port)
+			if err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("invalid HTTP URL port")
+			}
+		}
+		if c.HTTP.Timeout <= 0 || c.HTTP.Timeout > maximum {
+			return fmt.Errorf("HTTP timeout must be positive and <= dispatcher.delivery_timeout")
+		}
+		auth := c.HTTP.BasicAuth
+		if (auth.UsernameEnv == "") != (auth.PasswordEnv == "") {
+			return fmt.Errorf("basic_auth requires both username_env and password_env")
+		}
+		for _, name := range []string{auth.UsernameEnv, auth.PasswordEnv} {
+			if name != "" && !labelName.MatchString(name) {
+				return fmt.Errorf("invalid credential environment-variable name")
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported sink type; use log or http")
+	}
+	return nil
+}
+func (c SinkConfig) fingerprint() string {
+	encoded, _ := json.Marshal(c)
+	return tupleID(string(encoded))
+}
+func (c Config) sinkCatalog() map[string]string {
+	catalog := make(map[string]string, len(c.Delivery.Sinks))
+	for _, sink := range c.Delivery.Sinks {
+		catalog[sink.ID] = sink.fingerprint()
+	}
+	return catalog
+}
+func (c Config) sinkConfig(id string) (SinkConfig, bool) {
+	for _, sink := range c.Delivery.Sinks {
+		if sink.ID == id {
+			return sink, true
+		}
+	}
+	return SinkConfig{}, false
 }

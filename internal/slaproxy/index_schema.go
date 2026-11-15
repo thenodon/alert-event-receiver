@@ -32,6 +32,11 @@ func (s *DurableStore) indexTypes() map[string]string {
 		types[s.key(name)] = "set"
 	}
 	types[s.key("delivery-due")] = "zset"
+	for id := range s.catalog {
+		for _, name := range []string{"delivery-pending:", "delivery-inflight:", "delivery-failed:"} {
+			types[s.key(name+id)] = "set"
+		}
+	}
 	return types
 }
 func (s *DurableStore) initSchema(ctx context.Context) error {

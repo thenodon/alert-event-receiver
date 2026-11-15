@@ -58,7 +58,7 @@ func deliveryService(t *testing.T, c Config, sink Sink) *Service {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	if sink != nil {
-		s.dispatcher.sink = sink
+		s.dispatcher.sinks["default"] = sink
 	}
 	return s
 }
@@ -72,7 +72,7 @@ func deliveryRow(t *testing.T, s *Service, id string) *DurableOccurrence {
 }
 func dispatch(t *testing.T, s *Service, id string) {
 	t.Helper()
-	if err := s.dispatcher.runOne(context.Background(), id); err != nil {
+	if err := s.dispatcher.runOne(context.Background(), testDeliveryWork(id)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -192,13 +192,13 @@ func TestDeliveryResolutionBeforeAuthorizationCancelsClaim(t *testing.T) {
 	sink := &controlledSink{}
 	s := deliveryService(t, deliveryConfig(t, f), sink)
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	claimed, err := s.dispatcher.claim(context.Background(), row.ID)
+	claimed, err := s.dispatcher.claim(context.Background(), testDeliveryWork(row.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	acceptTest(t, s.durable, "resolved", "2026-01-05T08:30:00+01:00", "2026-01-05T09:00:00+01:00")
-	canceled, err := s.dispatcher.authorize(context.Background(), claimed)
-	if err != nil || canceled.DeliveryClaim != nil || onlyBinding(t, canceled).Intents["firing"].AuthorizedAt != nil {
+	canceled, err := s.dispatcher.authorize(context.Background(), claimed, onlyBinding(t, claimed).ID)
+	if err != nil || onlyBinding(t, canceled).Claim != nil || onlyBinding(t, canceled).Intents["firing"].AuthorizedAt != nil {
 		t.Fatal(canceled, err)
 	}
 	dispatch(t, s, row.ID)
@@ -230,7 +230,7 @@ func TestDeliveryResolutionDuringSinkAndCompetingDispatcher(t *testing.T) {
 	other := deliveryService(t, cfg, sink)
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
 	done := make(chan error, 1)
-	go func() { done <- s.dispatcher.runOne(context.Background(), row.ID) }()
+	go func() { done <- s.dispatcher.runOne(context.Background(), testDeliveryWork(row.ID)) }()
 	await(t, entered)
 	dispatch(t, other, row.ID) // Another process cannot own the active claim.
 	acceptTest(t, other.durable, "resolved", "2026-01-05T08:30:00+01:00", "2026-01-05T18:30:00+01:00")
@@ -258,24 +258,24 @@ func TestDeliveryClaimExpiryRecoveryAndFencing(t *testing.T) {
 	cfg := deliveryConfig(t, f)
 	s := deliveryService(t, cfg, sink)
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	old, err := s.dispatcher.claim(context.Background(), row.ID)
+	old, err := s.dispatcher.claim(context.Background(), testDeliveryWork(row.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	old, err = s.dispatcher.authorize(context.Background(), old)
+	old, err = s.dispatcher.authorize(context.Background(), old, onlyBinding(t, old).ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Simulate process loss after durable authorization; a fresh service recovers.
 	restarted := deliveryService(t, cfg, sink)
-	waitPast(t, old.DeliveryClaim.Until)
+	waitPast(t, onlyBinding(t, old).Claim.Until)
 	dispatch(t, restarted, row.ID)
 	current := deliveryRow(t, restarted, row.ID)
 	r := onlyBinding(t, current).Intents["firing"].Receipt
-	if r == nil || r.Attempts != 2 || r.Fence <= old.DeliveryClaim.Fence {
+	if r == nil || r.Attempts != 2 || r.Fence <= onlyBinding(t, old).Claim.Fence {
 		t.Fatal(r)
 	}
-	if err := s.dispatcher.finish(context.Background(), old, deliveryEvent(old), nil, time.Now().UTC()); !errors.Is(err, ErrFenced) {
+	if err := s.dispatcher.finish(context.Background(), old, deliveryEvent(old, onlyBinding(t, old).ID), nil, time.Now().UTC()); !errors.Is(err, ErrFenced) {
 		t.Fatal("expired owner committed", err)
 	}
 	if len(sink.snapshot()) != 1 {
@@ -289,12 +289,12 @@ func TestDeliveryClaimedCrashBeforeAuthorization(t *testing.T) {
 	cfg := deliveryConfig(t, f)
 	s := deliveryService(t, cfg, sink)
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	old, err := s.dispatcher.claim(context.Background(), row.ID)
+	old, err := s.dispatcher.claim(context.Background(), testDeliveryWork(row.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	restarted := deliveryService(t, cfg, sink)
-	waitPast(t, old.DeliveryClaim.Until)
+	waitPast(t, onlyBinding(t, old).Claim.Until)
 	dispatch(t, restarted, row.ID)
 	receipt := onlyBinding(t, deliveryRow(t, restarted, row.ID)).Intents["firing"].Receipt
 	if receipt == nil || receipt.Attempts != 1 {
@@ -309,7 +309,7 @@ func TestDeliverySuccessWithStoreOutageAndResolutionRecovery(t *testing.T) {
 	cfg := deliveryConfig(t, f)
 	s := deliveryService(t, cfg, sink)
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	if err := s.dispatcher.runOne(context.Background(), row.ID); err == nil {
+	if err := s.dispatcher.runOne(context.Background(), testDeliveryWork(row.ID)); err == nil {
 		t.Fatal("outcome acknowledged during outage")
 	}
 	if len(sink.snapshot()) != 1 {
@@ -322,7 +322,7 @@ func TestDeliverySuccessWithStoreOutageAndResolutionRecovery(t *testing.T) {
 	if onlyBinding(t, persisted).Intents["firing"].Receipt != nil {
 		t.Fatal("invented receipt")
 	}
-	waitPast(t, persisted.DeliveryClaim.Until)
+	waitPast(t, onlyBinding(t, persisted).Claim.Until)
 	dispatch(t, restarted, row.ID)
 	dispatch(t, restarted, row.ID)
 	events := sink.snapshot()
@@ -370,7 +370,7 @@ func TestDeliveryTransientAndPermanentFailures(t *testing.T) {
 	permanent := &controlledSink{call: func(context.Context, DeliveryEvent) error {
 		return &DeliveryError{Permanent: true, Cause: errors.New("secret")}
 	}}
-	s.dispatcher.sink = permanent
+	s.dispatcher.sinks["default"] = permanent
 	other := alertAt(t, "firing", "sla_id", "2026-01-05T08:31:00+01:00")
 	other.Fingerprint = "permanent"
 	accepted, err := s.durable.accept(context.Background(), other, modelsPayload(other))
@@ -379,7 +379,7 @@ func TestDeliveryTransientAndPermanentFailures(t *testing.T) {
 	}
 	dispatch(t, s, accepted.Occurrence.ID)
 	held := deliveryRow(t, s, accepted.Occurrence.ID)
-	if !onlyBinding(t, held).Intents["firing"].PermanentFailure || !held.deliveryDueAt().IsZero() {
+	if !onlyBinding(t, held).Intents["firing"].PermanentFailure || !onlyBinding(t, held).deliveryDueAt(held).IsZero() {
 		t.Fatal("permanent failure not held", held)
 	}
 }
@@ -412,7 +412,7 @@ func TestDeliveryPolicyHoldAndDestinationPin(t *testing.T) {
 	}
 }
 
-func TestDeliveryDisabledCompatibilityAndServiceShutdown(t *testing.T) {
+func TestDeliveryDisabledAndServiceShutdown(t *testing.T) {
 	f := realValkey(t)
 	disabled := integrationConfig(t, f)
 	legacy := deliveryService(t, disabled, nil)
@@ -420,15 +420,15 @@ func TestDeliveryDisabledCompatibilityAndServiceShutdown(t *testing.T) {
 		t.Fatal("delivery enabled implicitly")
 	}
 	row := acceptTest(t, legacy.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	if onlyBinding(t, row).SinkType != "" || onlyBinding(t, row).Intents["firing"].Receipt != nil {
+	if onlyBinding(t, row).SinkType != "log" || onlyBinding(t, row).Intents["firing"].Receipt != nil {
 		t.Fatal("disabled behavior changed")
 	}
-	// Enabling delivery adopts existing Phase 3 intent metadata through maintenance.
+	// Enabling delivery activates the already frozen native sink binding.
 	sink := &controlledSink{}
 	enabled := deliveryConfig(t, f)
 	if candidate, err := New(enabled, slog.New(slog.NewJSONHandler(io.Discard, nil))); err == nil {
 		_ = candidate.Close()
-		t.Fatal("delivery format activated without a new epoch")
+		t.Fatal("delivery enabled without a new epoch")
 	}
 	enabled.Durable.PolicyEpoch++
 	s := deliveryService(t, enabled, sink)
@@ -466,13 +466,13 @@ func TestDeliveryRetentionAndNoopLeasePreservation(t *testing.T) {
 	s := deliveryService(t, deliveryConfig(t, f), &controlledSink{})
 	ctx := context.Background()
 	row := acceptTest(t, s.durable, "firing", "2026-01-05T08:30:00+01:00", "")
-	claimed, err := s.dispatcher.claim(ctx, row.ID)
+	claimed, err := s.dispatcher.claim(ctx, testDeliveryWork(row.ID))
 	if err != nil {
 		t.Fatal(err)
 	}
 	key := s.durable.store.rowKey(row.ID)
 	before := s.durable.store.client.Get(ctx, key).Val()
-	expiry := s.durable.store.client.PExpireTime(ctx, s.durable.store.deliveryClaimKey(row.ID)).Val()
+	expiry := s.durable.store.client.PExpireTime(ctx, s.durable.store.deliveryClaimKey(row.ID, onlyBinding(t, row).ID)).Val()
 	var pending []string
 	for range 2 {
 		if err := s.durable.maintenance(ctx, &pending); err != nil {
@@ -482,10 +482,10 @@ func TestDeliveryRetentionAndNoopLeasePreservation(t *testing.T) {
 	if after := s.durable.store.client.Get(ctx, key).Val(); after != before {
 		t.Fatal("no-op maintenance rewrote delivery claim")
 	}
-	if after := s.durable.store.client.PExpireTime(ctx, s.durable.store.deliveryClaimKey(row.ID)).Val(); after != expiry {
+	if after := s.durable.store.client.PExpireTime(ctx, s.durable.store.deliveryClaimKey(row.ID, onlyBinding(t, row).ID)).Val(); after != expiry {
 		t.Fatal("delivery lease renewed")
 	}
-	authorized, err := s.dispatcher.authorize(ctx, claimed)
+	authorized, err := s.dispatcher.authorize(ctx, claimed, onlyBinding(t, claimed).ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +507,7 @@ func TestDeliveryRetentionAndNoopLeasePreservation(t *testing.T) {
 	if retained.Compacted || onlyBinding(t, retained).Intents["firing"].Payload == nil {
 		t.Fatal("pending payload lost")
 	}
-	if err := s.dispatcher.finish(ctx, authorized, deliveryEvent(authorized), nil, time.Now().UTC()); err != nil {
+	if err := s.dispatcher.finish(ctx, authorized, deliveryEvent(authorized, onlyBinding(t, authorized).ID), nil, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	dispatch(t, s, row.ID)
@@ -580,7 +580,11 @@ func TestDeliveryConcurrentClaimTransactions(t *testing.T) {
 	var workers sync.WaitGroup
 	outcomes := make(chan error, 2)
 	for _, s := range services {
-		workers.Go(func() { <-barrier; _, err := s.dispatcher.claim(context.Background(), row.ID); outcomes <- err })
+		workers.Go(func() {
+			<-barrier
+			_, err := s.dispatcher.claim(context.Background(), testDeliveryWork(row.ID))
+			outcomes <- err
+		})
 	}
 	close(barrier)
 	workers.Wait()
@@ -611,10 +615,10 @@ func TestDeliveryDiscoveryRepairWithoutRecordRewrite(t *testing.T) {
 	if err := store.client.Del(ctx, store.key("delivery-due"), store.key("delivery-ready")).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.client.SAdd(ctx, store.key("delivery-claimed"), row.ID).Err(); err != nil {
+	if err := store.client.SAdd(ctx, store.key("delivery-claimed"), testDeliveryWork(row.ID)).Err(); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.client.Set(ctx, store.deliveryClaimKey(row.ID), "orphan", time.Second).Err(); err != nil {
+	if err := store.client.Set(ctx, store.deliveryClaimKey(row.ID, onlyBinding(t, row).ID), "orphan", time.Second).Err(); err != nil {
 		t.Fatal(err)
 	}
 	var pending []string
@@ -624,14 +628,14 @@ func TestDeliveryDiscoveryRepairWithoutRecordRewrite(t *testing.T) {
 	if after := store.client.Get(ctx, store.rowKey(row.ID)).Val(); after != before {
 		t.Fatal("index-only delivery repair rewrote record")
 	}
-	if store.client.Exists(ctx, store.deliveryClaimKey(row.ID)).Val() != 0 {
+	if store.client.Exists(ctx, store.deliveryClaimKey(row.ID, onlyBinding(t, row).ID)).Val() != 0 {
 		t.Fatal("orphan token retained")
 	}
-	if store.client.SIsMember(ctx, store.key("delivery-claimed"), row.ID).Val() {
+	if store.client.SIsMember(ctx, store.key("delivery-claimed"), testDeliveryWork(row.ID)).Val() {
 		t.Fatal("orphan claimed index retained")
 	}
 	ids, err := s.dispatcher.poll(ctx)
-	if err != nil || len(ids) != 1 || ids[0] != row.ID {
+	if err != nil || len(ids) != 1 || ids[0] != testDeliveryWork(row.ID) {
 		t.Fatal("ready discovery not recovered", ids, err)
 	}
 	dispatch(t, s, row.ID)

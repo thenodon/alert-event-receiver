@@ -137,26 +137,18 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) (er
 		}
 	}
 	*pending = (*pending)[count:]
-	// Index entries whose records were removed by a completed-retention commit
-	// are removed in that same transaction. Missing record entries are harmless
-	// and cleaned when discovered by due processing or maintenance below.
-	for _, index := range []string{"due", "retention"} {
+	for _, index := range []string{"due", "retention", "delivery-due"} {
 		ids, err := m.store.due(ctx, index, m.cfg.Durable.Scheduler.BatchSize)
 		if err != nil {
 			return err
 		}
-		for _, id := range ids {
-			row, err := m.store.load(ctx, id)
-			if err != nil {
+		for _, member := range ids {
+			if err := m.store.cleanOrphan(ctx, index, member); err != nil {
 				return err
-			}
-			if row == nil {
-				if _, err := m.store.reconcile(ctx, id, func(*DurableOccurrence, time.Time) (*DurableOccurrence, error) { return nil, nil }); err != nil {
-					return err
-				}
 			}
 		}
 	}
+
 	if err := m.reconcileIndex(ctx); err != nil {
 		return err
 	}
@@ -176,12 +168,20 @@ func (m *DurableManager) maintenance(ctx context.Context, pending *[]string) (er
 func (m *DurableManager) reconcileIndex(ctx context.Context) (err error) {
 	defer func() { err = m.store.readError(ctx, err) }()
 	indexes := []string{"unresolved", "pending", "held", "intent-index", "delivery-ready", "delivery-claimed", "delivery-held", "due", "retention", "delivery-due"}
+	for _, sink := range m.cfg.Delivery.Sinks {
+		for _, name := range []string{"delivery-pending:", "delivery-inflight:", "delivery-failed:"} {
+			indexes = append(indexes, name+sink.ID)
+		}
+	}
+	if m.indexPosition >= len(indexes) {
+		m.indexPosition = 0
+	}
 	index := indexes[m.indexPosition]
 	if len(m.indexPending) == 0 {
 		var page []string
 		var cursor uint64
 		var err error
-		if m.indexPosition < 7 {
+		if index != "due" && index != "retention" && index != "delivery-due" {
 			page, cursor, err = m.store.client.SScan(ctx, m.store.key(index), m.indexCursor, "*", int64(m.cfg.Durable.Scheduler.BatchSize)).Result()
 		} else {
 			var scored []string
@@ -196,19 +196,12 @@ func (m *DurableManager) reconcileIndex(ctx context.Context) (err error) {
 		m.indexCursor, m.indexPending = cursor, page
 	}
 	count := min(len(m.indexPending), m.cfg.Durable.Scheduler.BatchSize)
-	for _, id := range m.indexPending[:count] {
-		// WATCH handles a concurrent creation after the scan. Never delete a live row
-		// or disturb an active claim merely to remove an orphan index membership.
-		_, err := m.store.reconcile(ctx, id, func(row *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {
-			if row != nil {
-				return nil, ErrClaimBusy
-			}
-			return nil, nil
-		})
-		if err != nil && !errors.Is(err, ErrClaimBusy) {
+	for _, member := range m.indexPending[:count] {
+		if err := m.store.cleanOrphan(ctx, index, member); err != nil {
 			return err
 		}
 	}
+
 	m.indexPending = m.indexPending[count:]
 	if len(m.indexPending) == 0 && m.indexCursor == 0 {
 		m.indexPosition = (m.indexPosition + 1) % len(indexes)

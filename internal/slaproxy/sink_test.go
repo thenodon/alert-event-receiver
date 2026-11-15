@@ -84,7 +84,7 @@ func TestDeliveryConfigurationDefaultsAndValidation(t *testing.T) {
 		t.Fatal(c.Delivery)
 	}
 	for name, mutate := range map[string]func(*DeliveryConfig){
-		"http":    func(d *DeliveryConfig) { d.Sink.Type = "http" },
+		"http":    func(d *DeliveryConfig) { d.Sinks[0].Type = "http" },
 		"workers": func(d *DeliveryConfig) { d.Dispatcher.Workers = 0 },
 		"batch":   func(d *DeliveryConfig) { d.Dispatcher.BatchSize = 0 },
 		"poll":    func(d *DeliveryConfig) { d.Dispatcher.PollInterval = 0 },
@@ -94,6 +94,7 @@ func TestDeliveryConfigurationDefaultsAndValidation(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := c
+			bad.Delivery.Sinks = append([]SinkConfig(nil), c.Delivery.Sinks...)
 			mutate(&bad.Delivery)
 			if err := bad.Validate(); err == nil {
 				t.Fatal("invalid delivery config accepted")
@@ -115,7 +116,7 @@ func TestLoggingDeliveryConfigurationExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Delivery.Enabled || cfg.Delivery.Sink.Type != "log" {
+	if !cfg.Delivery.Enabled || cfg.Delivery.Sinks[0].Type != "log" {
 		t.Fatal(cfg.Delivery)
 	}
 }
@@ -132,5 +133,74 @@ func TestDeliveryBackoffBoundsAndCapJitter(t *testing.T) {
 		if got := deliveryRetryDelay(5*time.Second, 5*time.Minute, tc.attempt, tc.jitter); got != tc.want {
 			t.Fatal(tc, got)
 		}
+	}
+}
+
+func TestMultiSinkConfiguration(t *testing.T) {
+	validHTTP := func() SinkConfig {
+		return SinkConfig{ID: "servicenow", Type: "http", HTTP: &HTTPSinkConfig{URL: "https://sn.example/api?source=prometheus", Timeout: time.Second}}
+	}
+	for name, mutate := range map[string]func(*DeliveryConfig){
+		"empty":          func(d *DeliveryConfig) { d.Sinks = nil },
+		"duplicate":      func(d *DeliveryConfig) { d.Sinks = append(d.Sinks, d.Sinks[0]) },
+		"empty ID":       func(d *DeliveryConfig) { d.Sinks[0].ID = "" },
+		"unsafe ID":      func(d *DeliveryConfig) { d.Sinks[0].ID = "a:{b}" },
+		"unknown":        func(d *DeliveryConfig) { d.Sinks[0].Type = "servicenow" },
+		"missing HTTP":   func(d *DeliveryConfig) { d.Sinks[0].HTTP = nil },
+		"zero timeout":   func(d *DeliveryConfig) { d.Sinks[0].HTTP.Timeout = 0 },
+		"excess timeout": func(d *DeliveryConfig) { d.Sinks[0].HTTP.Timeout = time.Hour },
+		"partial auth":   func(d *DeliveryConfig) { d.Sinks[0].HTTP.BasicAuth.UsernameEnv = "USER" },
+		"invalid env": func(d *DeliveryConfig) {
+			d.Sinks[0].HTTP.BasicAuth.UsernameEnv = "bad-env"
+			d.Sinks[0].HTTP.BasicAuth.PasswordEnv = "PASS"
+		},
+		"log HTTP settings": func(d *DeliveryConfig) { d.Sinks[0].Type = "log" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t)
+			cfg.Durable.Enabled = true
+			cfg.Delivery.Enabled = true
+			cfg.Delivery.Sinks = []SinkConfig{validHTTP()}
+			mutate(&cfg.Delivery)
+			if err := cfg.Validate(); err == nil {
+				t.Fatal("invalid sink accepted")
+			}
+		})
+	}
+	for _, url := range []string{"", "://broken", "ftp://example.com", "https://", "https://user:secret@example.com", "https://example.com/#fragment", "http://example.com:0", "https://example.com:65536", "https://example.com:", "https://example.com/a b"} {
+		sink := validHTTP()
+		sink.HTTP.URL = url
+		if err := sink.Validate(10 * time.Second); err == nil {
+			t.Errorf("accepted URL %q", url)
+		} else if strings.Contains(err.Error(), "secret") {
+			t.Fatal("URL leaked")
+		}
+	}
+	cfg := testConfig(t)
+	cfg.Durable.Enabled = true
+	cfg.Delivery.Enabled = true
+	cfg.Delivery.Sinks = []SinkConfig{validHTTP(), {ID: "second-http", Type: "http", HTTP: &HTTPSinkConfig{URL: "http://localhost:9080/hook", Timeout: time.Second}}, {ID: "audit", Type: "log"}, {ID: "other-log", Type: "log"}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, legacy := range []string{"durable:\n  sink_id: default\n", "delivery:\n  sink: {type: log}\n"} {
+		if _, err := LoadConfig(strings.NewReader(exampleConfig + legacy)); err == nil {
+			t.Fatal("legacy schema accepted")
+		}
+	}
+}
+
+func TestHTTPDeliveryConfigurationExample(t *testing.T) {
+	f, err := os.Open("../../docs/examples/alert-sla-proxy-delivery-http.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	cfg, err := LoadConfig(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Delivery.Enabled || len(cfg.Delivery.Sinks) != 2 || cfg.Delivery.Sinks[0].Type != "http" || cfg.Delivery.Sinks[0].HTTP.BasicAuth.UsernameEnv != "SERVICENOW_USERNAME" || cfg.Delivery.Sinks[1].Type != "log" {
+		t.Fatal("invalid multi-sink example")
 	}
 }
