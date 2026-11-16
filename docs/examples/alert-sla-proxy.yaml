@@ -2,12 +2,14 @@
 # Defaults to observe-only: no Valkey connection, runtime sinks or HTTP credentials.
 # To deliver, configure Valkey and the HTTP endpoint, set the credential variables,
 # and enable BOTH durable.enabled and delivery.enabled below.
-listen_address: ":9012"
+listen_address: ":9012" # Bind a private/loopback address or use a protected reverse proxy.
 webhook_path: /webhook
 max_body_bytes: 1048576
 shutdown_timeout: 10s
-evaluation_horizon_days: 370
+evaluation_horizon_days: 370 # Local dates searched; 1–3660, not permanent ineligibility.
 
+# First nonempty matching label selects its independent policy map; no fallback
+# for unknown values. Policies do not select sinks: every occurrence freezes all sinks.
 sla_definitions:
   - sla_label: sla_id
     slas:
@@ -53,6 +55,7 @@ durable:
     retry_initial: 5s
     retry_max: 5m
     reconcile_interval: 30s
+  # Repeats do not extend retention; unresolved/outstanding/held work may live longer.
   retention:
     completed_payload: 720h # 30 days after first durable resolution receipt.
     tombstone: 2160h       # 90 days after first durable resolution receipt.
@@ -60,6 +63,8 @@ durable:
 delivery:
   enabled: false
   sinks:
+    # Placeholder remote endpoint: replace before enabling delivery. Destination
+    # URL/type/timeout/auth-reference changes are rejected once registered.
     - id: incident_management_system
       type: http
       http:
@@ -71,6 +76,7 @@ delivery:
         idempotency_key: true # Optional; defaults to true. Backend support is not assumed.
     - id: audit
       type: log
+  # Advanced shared worker/retry tuning; minimal examples omit these defaults.
   dispatcher:
     poll_interval: 1s
     workers: 4

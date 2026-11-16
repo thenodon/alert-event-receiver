@@ -1,5 +1,7 @@
 # Load testing with `alertload`
 
+[Documentation index](README.md) · [Receiver operations](event-receiver/operations.md) · [Development](development.md)
+
 `alertload` generates Alertmanager-compatible webhook traffic to test alert
 lifecycle handling and throughput. It supports individual scenarios, weighted
 mixed workloads, CSV/JSON scenario files, and optional receiver metric and

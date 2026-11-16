@@ -269,7 +269,7 @@ alertreceiver_resolved_orphans_total
 alertreceiver_closed_ttl_seconds
 ```
 
-Consult [README](../README.md#observability) for their descriptions and the application endpoints.
+Consult [receiver metric reference](event-receiver/reference.md#metrics) for their descriptions and the application endpoints.
 
 
 ## Delivery Semantics and Failure Handling
@@ -288,7 +288,7 @@ been removed to avoid double counting. Do not sum both metrics for the same erro
 correlation. Batch exporter errors deliberately have no event_id. The new
 `alertreceiver_otlp_export_requests_total{result="error"}` reports failed exporter
 calls, not rollback of Valkey state or confirmed permanent loss of every record
-in a batch. See [delivery metrics and limitations](../README.md#delivery-semantics-and-failure-handling).
+in a batch. See [delivery metrics and limitations](event-receiver/operations.md#delivery-semantics-and-failure-handling).
 
 ## Alert SLA Proxy keys and debugging
 
@@ -550,10 +550,56 @@ quarantines the namespace and does not acknowledge successful processing. Stop
 instances, preserve/back up data, install a fresh maintenance fence generation
 before repair, restore declared index types, install the ready fence with the new
 generation, then restart. Follow the complete
-[fence-first repair procedure](specifications/sla-proxy-hardening.md#transactions-and-the-schema-ownership-contract).
+[fence-first repair procedure](#fence-first-quarantine-repair).
 Missing memberships/scores are reconciled without rewriting unchanged occurrences
 or renewing active leases. Missing/incorrect/orphan discovery entries are repaired
 eventually; do not delete source records to clear queue counts.
 
-See the [SLA proxy service guide](alert-sla-proxy.md#multi-sink-delivery)
+See [SLA proxy operations](sla-proxy/operations.md)
 for delivery ordering, retries, at-least-once crash windows and per-sink metrics.
+
+
+### Fence-first quarantine repair
+
+This is advanced operator recovery for the current owned-schema protocol. Normal
+configuration changes require no key deletion. Do not use repair to redirect
+pending work, erase receipts or migrate unsupported development schemas.
+
+The control key `<namespace>:{sla}:index-schema` is a JSON string with `version`,
+`state` and `generation`. The current version is 1. Normal operation uses `ready`;
+maintenance/repair must install a new generation rather than reuse an old fence.
+
+1. Stop **all** instances using the namespace and pause input. Preserve/back up
+   occurrence JSON, receipts and both configuration registries. Investigate key,
+   command, persistence, resource and ACL errors. A failed EXEC can have committed
+   sibling writes; do not overwrite possibly committed receipts with older state.
+2. Before altering key types, set the schema fence to version 1,
+   `state: maintenance`, with a fresh unique generation. Never reuse an old ready
+   fence value. Apply the same protocol to planned type-changing maintenance.
+3. Restore declared types. Shared sets are unresolved, pending, held, intent-index,
+   delivery-ready, delivery-claimed and delivery-held. Per-sink delivery-pending,
+   delivery-inflight and delivery-failed keys are sets. Shared sorted sets are due,
+   retention and delivery-due. Occurrences, registries, schema fence and claim
+   tokens are strings. Missing discovery indexes can be rebuilt; do not delete
+   authoritative records, tokens or registries as a shortcut. Restore corrupt
+   authoritative data from a consistent backup where needed.
+4. Verify the schema, then set version 1, `state: ready`, keeping the **new**
+   generation. Restart processes. Running processes do not clear fatal state or
+   adopt a different generation in place.
+5. Allow bounded reconciliation to restore memberships/scores and remove orphan
+   discovery entries. It preserves unchanged source versions, timestamps and
+   active lease expirations. Recovery is eventual; inspect queues, holds, readiness
+   and logs before resuming traffic. Readiness does not promise a full scan.
+
+A new repair generation alone does not require a policy epoch change when catalog,
+mode and protocol are unchanged. A store-protocol upgrade may require a higher
+epoch; consult its release/implementation notes and do not mix incompatible clients.
+There is no repair/redrive API or automatic deletion of corrupted source data.
+
+A quarantine marker is best effort if Valkey is unavailable or cannot save it.
+The detecting process still fails closed, but peers may not observe an unconfirmed
+marker. Stop all instances operationally. An authorized external call can finish
+while the store fails; receipt ambiguity can cause a same-ID retry after recovery.
+See [implementation notes](specifications/sla-proxy-implementation.md) and the
+[historical hardening evidence](specifications/sla-proxy-hardening.md) for the
+transaction and error-detection limits.
