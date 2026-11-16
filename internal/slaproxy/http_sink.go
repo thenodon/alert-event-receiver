@@ -3,10 +3,13 @@ package slaproxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -86,6 +89,35 @@ func retryAfter(value string, now time.Time) time.Duration {
 	}
 	return 0
 }
+
+// Classify typed errors before discarding all endpoint/transport details.
+func httpTransportFailure(err error) string {
+	if errors.Is(err, context.Canceled) {
+		return "canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var network net.Error
+	if errors.As(err, &network) && network.Timeout() {
+		return "timeout"
+	}
+	var verification *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	var record tls.RecordHeaderError
+	if errors.As(err, &verification) || errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid) || errors.As(err, &record) {
+		return "tls_error"
+	}
+	var operation *net.OpError
+	var dns *net.DNSError
+	if errors.As(err, &operation) || errors.As(err, &dns) {
+		return "connection_error"
+	}
+	return "transport_error"
+}
+
 func (s *HTTPSink) Deliver(parent context.Context, e DeliveryEvent) (result error) {
 	payload, err := json.Marshal(singleAlertPayload(e))
 	if err != nil {
@@ -107,6 +139,7 @@ func (s *HTTPSink) Deliver(parent context.Context, e DeliveryEvent) (result erro
 	}
 	began := time.Now()
 	status := 0
+	failureClass := "none"
 	defer func() {
 		elapsed := time.Since(began).Seconds()
 		outcome := "success"
@@ -122,14 +155,15 @@ func (s *HTTPSink) Deliver(parent context.Context, e DeliveryEvent) (result erro
 			s.metrics.httpDuration.WithLabelValues(e.SinkID).Observe(elapsed)
 		}
 		if s.logger != nil {
-			s.logger.InfoContext(parent, "SLA HTTP request completed", "component", "sla_sink", "sink_id", e.SinkID, "sink_type", "http", "intent_id", e.IntentID, "occurrence_id", e.OccurrenceID, "binding_id", e.BindingID, "action", e.Action, "attempt", e.Attempt, "http_status", status, "duration_seconds", elapsed, "outcome", outcome)
+			s.logger.InfoContext(parent, "SLA HTTP request completed", "component", "sla_sink", "sink_id", e.SinkID, "sink_type", "http", "intent_id", e.IntentID, "occurrence_id", e.OccurrenceID, "binding_id", e.BindingID, "action", e.Action, "attempt", e.Attempt, "http_status", status, "duration_seconds", elapsed, "outcome", outcome, "failure_class", failureClass)
 		}
 	}()
 	response, err := s.client.Do(request)
 	if err != nil {
 		// Discard url.Error and transport details: URLs and proxy/authentication data
 		// can contain secrets. Cancellation/timeout remain retryable ambiguous calls.
-		return &DeliveryError{Cause: errors.New("HTTP transport, cancellation or timeout failure")}
+		failureClass = httpTransportFailure(err)
+		return &DeliveryError{FailureClass: failureClass, Cause: errors.New("HTTP " + failureClass + " failure")}
 	}
 	defer response.Body.Close()
 	status = response.StatusCode

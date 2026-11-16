@@ -420,15 +420,19 @@ Set credentials through the deployment's secret mechanism, then start:
 Delivery defaults to disabled. The native default sink list is one `default` log
 sink. Explicit durable configuration must contain 1–32 sinks with unique stable
 IDs matching `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`. Unknown types/fields, duplicate
-IDs, malformed URLs, userinfo/fragments, missing authentication variables and
-invalid timeouts fail startup. Both `username` and `password` must be provided
+IDs, malformed URLs, userinfo/fragments and invalid timeouts fail startup. Both `username` and `password` must be provided
 together. Each accepts a literal value or an exact `${NAME}` environment reference.
-They may be mixed (a literal username and an environment password). Missing/empty
-referenced variables fail startup. Partial interpolation such as `prefix${NAME}`
-and malformed references are rejected; resolved values are not expanded recursively.
+They may be mixed (a literal username and an environment password). When delivery
+is enabled, missing/empty referenced variables fail startup. Partial interpolation
+such as `prefix${NAME}` and malformed references are rejected; resolved values are not expanded recursively.
 Expansion applies only to these Basic Authentication fields, not the whole YAML.
 Values must be nonempty; username colons and credential CR/LF are
-rejected. All configured sinks are validated even when dispatch is disabled.
+rejected during runtime sink initialization. All configured sinks receive
+structural validation even when delivery is disabled.
+Concrete log/HTTP sinks, HTTP clients and transports are initialized only when
+`delivery.enabled: true`. HTTP credential references are resolved only then;
+missing HTTP credential variables do not prevent observe-only or durable-state-only
+startup. Disabled delivery makes no downstream requests.
 
 HTTP timeout must be positive and no greater than `dispatcher.delivery_timeout`.
 Shared delivery timeout must be positive and at most 1 minute; claim lease must
@@ -641,7 +645,22 @@ persistence. Duplicate log records with the same intent ID are possible.
 
 HTTP attempts log `SLA HTTP request completed` with sink/type, intent/occurrence/
 binding, action, attempt, status, duration and outcome. A receipt-commit log is
-separate from sink success. Failure logs omit raw sink errors.
+separate from sink success. Failure logs omit raw sink errors. Transport failures
+include a bounded `failure_class`: `canceled` for context cancellation, `timeout`
+for deadline expiry or a typed network timeout, `tls_error` for typed certificate
+verification or TLS record errors, `connection_error` for other typed network
+operation/DNS errors, and `transport_error` otherwise. Classification checks
+cancellation before timeout, then TLS before generic connection errors; it uses
+standard error types without hostname inspection or message matching. Successful
+calls and HTTP status responses log `failure_class: none`.
+
+All five transport classes remain retryable, including TLS errors and cancellation.
+The existing HTTP metric retains `status_class="network_error"` for these failures
+and `result="temporary_failure"`; the finer diagnostic class is in structured logs
+and `DeliveryError.FailureClass`. Raw transport errors are discarded, including
+from the returned error chain. HTTP status classification and Retry-After rules
+are unchanged. These diagnostics do not remove ambiguous external outcomes or
+provide exactly-once delivery.
 
 | Metric | Meaning |
 |---|---|

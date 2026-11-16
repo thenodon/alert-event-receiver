@@ -3,12 +3,17 @@ package slaproxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -144,21 +149,20 @@ func TestHTTPSinkTimeoutCancellationRedirectAndTLS(t *testing.T) {
 		if err == nil || deliveryFailure(err) != "temporary_failure" || time.Since(began) > time.Second {
 			t.Fatal(err)
 		}
+		assertHTTPFailure(t, err, "timeout")
 	})
 	t.Run("cancelled", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		if err := testHTTPSink(t, "http://127.0.0.1:1/secret?token=hidden", time.Second).Deliver(ctx, httpEvent()); err == nil || strings.Contains(err.Error(), "hidden") || strings.Contains(err.Error(), "secret") {
-			t.Fatal(err)
-		}
+		err := testHTTPSink(t, "http://127.0.0.1:1/secret?token=hidden", time.Second).Deliver(ctx, httpEvent())
+		assertHTTPFailure(t, err, "canceled")
 	})
 	t.Run("connection", func(t *testing.T) {
 		server := httptest.NewServer(http.NotFoundHandler())
 		url := server.URL
 		server.Close()
-		if err := testHTTPSink(t, url, time.Second).Deliver(context.Background(), httpEvent()); err == nil || deliveryFailure(err) != "temporary_failure" || strings.Contains(err.Error(), url) {
-			t.Fatal(err)
-		}
+		err := testHTTPSink(t, url, time.Second).Deliver(context.Background(), httpEvent())
+		assertHTTPFailure(t, err, "connection_error")
 	})
 	t.Run("redirect", func(t *testing.T) {
 		var calls atomic.Int64
@@ -174,9 +178,8 @@ func TestHTTPSinkTimeoutCancellationRedirectAndTLS(t *testing.T) {
 	t.Run("untrusted TLS", func(t *testing.T) {
 		server := httptest.NewTLSServer(http.NotFoundHandler())
 		defer server.Close()
-		if err := testHTTPSink(t, server.URL, time.Second).Deliver(context.Background(), httpEvent()); err == nil || deliveryFailure(err) != "temporary_failure" {
-			t.Fatal(err)
-		}
+		err := testHTTPSink(t, server.URL, time.Second).Deliver(context.Background(), httpEvent())
+		assertHTTPFailure(t, err, "tls_error")
 	})
 }
 
@@ -232,5 +235,65 @@ func TestRetryAfterAndCredentialValidation(t *testing.T) {
 	t.Setenv("NONEXISTENT_SINK_PASSWORD", "secret-password")
 	if _, err := newHTTPSink(cfg, nil, nil, nil); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatal("invalid credentials not safely rejected", err)
+	}
+}
+
+func assertHTTPFailure(t *testing.T, err error, class string) {
+	t.Helper()
+	var failure *DeliveryError
+	if !errors.As(err, &failure) || failure.FailureClass != class || failure.Permanent || failure.HTTPStatus != 0 || failure.RetryAfter != 0 || deliveryFailure(err) != "temporary_failure" {
+		t.Fatalf("unexpected %s failure: %+v", class, failure)
+	}
+}
+
+func TestHTTPTransportDiagnosticsAreBoundedAndSanitized(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause error
+		class string
+	}{
+		{"fallback", errors.New("secret-password https://private.example/path?token=hidden Authorization: secret"), "transport_error"},
+		{"wrapped cancellation", fmt.Errorf("secret: %w", context.Canceled), "canceled"},
+		{"wrapped deadline", fmt.Errorf("secret: %w", context.DeadlineExceeded), "timeout"},
+		{"network timeout", &net.DNSError{Err: "secret", Name: "private.example", IsTimeout: true}, "timeout"},
+		{"dns", &net.DNSError{Err: "secret", Name: "private.example"}, "connection_error"},
+		{"certificate hostname", x509.HostnameError{Host: "private.example"}, "tls_error"},
+		{"certificate invalid", x509.CertificateInvalidError{}, "tls_error"},
+		{"certificate authority", x509.UnknownAuthorityError{}, "tls_error"},
+		{"TLS record", tls.RecordHeaderError{Msg: "secret"}, "tls_error"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			sink := testHTTPSink(t, "https://private.example/path?token=hidden", time.Second)
+			sink.username, sink.password = "secret-user", "secret-password"
+			sink.logger = slog.New(slog.NewJSONHandler(&logs, nil))
+			service := newTestService(t)
+			sink.metrics = service.metrics.delivery
+			sink.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, &url.Error{Op: "Post", URL: sink.config.URL, Err: tc.cause}
+			})}
+			err := sink.Deliver(context.Background(), httpEvent())
+			assertHTTPFailure(t, err, tc.class)
+			var record map[string]any
+			if e := json.Unmarshal(logs.Bytes(), &record); e != nil {
+				t.Fatal(e)
+			}
+			if record["failure_class"] != tc.class || record["outcome"] != "temporary_failure" {
+				t.Fatal(record)
+			}
+			if counter(t, service, "sla_proxy_http_requests_total", map[string]string{"sink_id": "servicenow", "status_class": "network_error", "result": "temporary_failure"}) != 1 {
+				t.Fatal("metric semantics changed")
+			}
+			diagnostic := logs.String() + err.Error() + errors.Unwrap(err).Error()
+			for _, sensitive := range []string{"private.example", "hidden", "secret", "Authorization", "/path", "original summary"} {
+				if strings.Contains(diagnostic, sensitive) {
+					t.Fatalf("sensitive diagnostic: %s", diagnostic)
+				}
+			}
+			var raw *url.Error
+			if errors.As(err, &raw) {
+				t.Fatal("retained raw URL error")
+			}
+		})
 	}
 }

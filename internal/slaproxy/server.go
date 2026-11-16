@@ -44,23 +44,28 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	}
 	s := &Service{cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
 	sinks := make(map[string]Sink, len(cfg.Delivery.Sinks))
-	var httpClient *http.Client
-	for _, destination := range cfg.Delivery.Sinks {
-		if destination.Type == "log" {
-			sinks[destination.ID] = LogSink{Handler: logger.Handler()}
-			continue
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = s.Close()
 		}
-		if httpClient == nil {
-			httpClient, s.httpTransport = newDeliveryHTTPClient(cfg.Delivery.Dispatcher.Workers)
-		}
-		sink, err := newHTTPSink(*destination.HTTP, httpClient, logger, s.metrics.delivery)
-		if err != nil {
-			if s.httpTransport != nil {
-				s.httpTransport.CloseIdleConnections()
+	}()
+	if cfg.Delivery.Enabled {
+		var httpClient *http.Client
+		for _, destination := range cfg.Delivery.Sinks {
+			if destination.Type == "log" {
+				sinks[destination.ID] = LogSink{Handler: logger.Handler()}
+				continue
 			}
-			return nil, fmt.Errorf("configure sink %s: %w", destination.ID, err)
+			if httpClient == nil {
+				httpClient, s.httpTransport = newDeliveryHTTPClient(cfg.Delivery.Dispatcher.Workers)
+			}
+			sink, err := newHTTPSink(*destination.HTTP, httpClient, logger, s.metrics.delivery)
+			if err != nil {
+				return nil, fmt.Errorf("configure sink %s: %w", destination.ID, err)
+			}
+			sinks[destination.ID] = sink
 		}
-		sinks[destination.ID] = sink
 	}
 	engine, err := NewCalendarEngine(cfg, observedHolidays{provider: CountryHolidays{}, metrics: s.metrics})
 	if err != nil {
@@ -126,6 +131,7 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 		_, _ = fmt.Fprintf(w, "{\"mode\":%q,\"ready\":true}\n", s.mode())
 	})
 	s.handler = mux
+	initialized = true
 	return s, nil
 }
 
