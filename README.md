@@ -245,6 +245,58 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
+## Alert SLA Proxy
+
+The separate `alert-sla-proxy` selects label-based SLA policies and evaluates
+weekly IANA schedules, holidays and active-interval overlap. By default it is
+stateless `observe_only`. Opt-in durable mode persists occurrences in Valkey, schedules
+pending alerts, handles out-of-order resolutions and prepares durable intent.
+With delivery disabled it never invokes a sink. Opt-in delivery supports multiple
+named log and HTTP webhook destinations, with independent durable receipts,
+retries and at-least-once attempts. HTTP requests contain one original Alertmanager
+alert; Basic Authentication accepts literal credentials or `${NAME}` environment references.
+
+Use the [complete configuration example](docs/examples/alert-sla-proxy.yaml),
+which includes Valkey, scheduling, retention, and both HTTP and log sinks:
+
+```bash
+go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
+```
+
+The example starts in observe-only mode. Select the desired mode in that file:
+
+| Mode | `durable.enabled` | `delivery.enabled` |
+|---|---|---|
+| Observe only | `false` | `false` |
+| Durable state and scheduling | `true` | `false` |
+| Durable state and sink delivery | `true` | `true` |
+
+Configure Valkey before enabling durable mode. Before enabling delivery, configure
+the HTTP endpoint and set the credential environment variables referenced by its
+Basic Authentication settings. Disabled delivery does not initialize runtime sinks
+or resolve HTTP credentials. Existing namespaces require a higher
+`durable.policy_epoch` when changing delivery enablement or the policy/sink catalog.
+
+Durable modes trust Alertmanager's webhook lifecycle. If an SLA opportunity arrives
+without a recorded resolution, the occurrence is considered firing in known
+state. There is no API verification, silence/inhibition recheck or invented
+freshness timeout. A delayed/lost resolution can therefore produce eligibility
+for an alert already resolved underneath; this limitation is accepted and logged.
+
+Durable mode acknowledges HTTP 200 only after all selected occurrences commit;
+partial/store failures return 503 and the batch is safely retryable. Valkey
+acceptance is not unconditional disk/replica persistence. Lifecycle, SLA eligibility
+and delivery status remain independent; policy changes hold pending bindings.
+The default listener is `:9012`, with `/webhook`, `/metrics`, `/healthz`, `/readyz`.
+Existing receiver lifecycle, Valkey schema and OTLP behavior are unchanged.
+Sink bindings are frozen at first durable acceptance, including pending alerts.
+New sinks affect new occurrences only; changing/removing a registered destination
+fails startup. Approved catalog changes require a higher `durable.policy_epoch`.
+There is no legacy schema migration. See the [service guide](docs/alert-sla-proxy.md)
+for multi-sink YAML, ServiceNow setup, recovery, metrics and security.
+HTTP 2xx means API acceptance, not completed ServiceNow processing.
+
 ## Load testing
 
 See the [alertload guide](docs/alertload.md) for lifecycle and weighted mixed load
@@ -526,7 +578,7 @@ inspection and idempotency troubleshooting.
 
 ## Current limitations and roadmap
 
-This version intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis.
+The event receiver intentionally does not implement a durable outbox, guaranteed OTLP delivery, atomic read/compare/write processing across concurrent requests, per-destination incident delivery, SLA/calendar policies, or NetBox enrichment. Only the latest occurrence is kept in Redis/Valkey; after tombstone expiry or state loss, older occurrence ordering cannot be reconstructed from Redis. The separate SLA proxy supports observation, opt-in durable SLA scheduling and independent log/HTTP delivery sinks with at-least-once attempts.
 
 v0.2.0 focuses on best-effort delivery observability. It adds no persistent queue, retries, replay, policies, or sinks.
 
@@ -535,6 +587,8 @@ v0.2.0 focuses on best-effort delivery observability. It adds no persistent queu
 ```text
 cmd/server/          Receiver entry point
 cmd/alertload/       Independent webhook lifecycle load generator
+cmd/alert-sla-proxy/ Independent SLA proxy (observation or durable state)
+internal/slaproxy/   SLA calendars, durable lifecycle/store, scheduler, HTTP and metrics
 internal/alertload/  Generator, bounded scheduler, HTTP workers and reports
 internal/config/     Environment configuration
 internal/models/     Alertmanager and lifecycle event models

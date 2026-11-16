@@ -1,8 +1,11 @@
-# Load testing with `alertload` (Phases 1 and 2)
+# Load testing with `alertload`
 
-`alertload` is an independent, standard-library HTTP client for generating
-Alertmanager-compatible webhook traffic. It does not import receiver processor
-or state packages, connect directly to Valkey, or change receiver behavior.
+`alertload` generates Alertmanager-compatible webhook traffic to test alert
+lifecycle handling and throughput. It supports individual scenarios, weighted
+mixed workloads, CSV/JSON scenario files, and optional receiver metric and
+VictoriaLogs checks. It sends requests directly to the webhook endpoint and
+does not connect directly to Valkey.
+
 **Requests sent to a receiver do change that receiver's state and may produce
 real downstream events. Use a dedicated test receiver and Valkey instance/DB.**
 Run IDs isolate alert identities; they do not isolate aggregate Prometheus
@@ -41,9 +44,10 @@ not one ten-second window shared between both phases.
 | `supersede` | Firing → newer firing with same fingerprint → older resolved → matching newer resolved |
 | `mixed` | Deterministically interleaved weighted cohorts of any of the seven profiles |
 
-A phase completes before the next begins, including its HTTP requests and bounded
-drain. Only original firing batches with a completed HTTP 2xx result are eligible
-for resolution; only successful resolution batches are eligible for repeated
+A **phase** is one execution step in a load run, such as sending firing batches
+or their matching resolutions. Each phase completes before the next begins,
+including its HTTP requests and bounded drain. Only original firing batches with
+a completed HTTP 2xx result are eligible for resolution; only successful resolution batches are eligible for repeated
 resolution. Repeated-firing failures do not remove eligibility already established
 by the original firing. A failed or timed-out firing is **unknown** if it may
 have mutated state; it is never automatically retried or assumed safe to resolve.
@@ -111,10 +115,13 @@ Workers construct and marshal payloads only after dequeueing a small request
 descriptor. The tool retains no unbounded payload pool or latency sample list.
 
 The plan is limited to **1,000,000 requests per phase** (`ceil(rate × duration)`).
-Phase 1 uses two compact eligibility bitsets (about 250 KB at the limit).
-Phase 2 additionally uses a one-byte-per-cohort assignment and at most 28
-success bitsets, about 4.5 MB of planning state at the limit. Latency/size recorders use fixed logarithmic
-histograms. Rate is limited to 1,000,000 requests/second; scheduling windows,
+Planning state is bounded: the firing, lifecycle, duplicates and orphans
+scenarios use about 250 KB at the request limit. Mixed, stale, reopen and
+supersede workloads also track cohort assignments and successful predecessor
+steps; planning state remains below about 4.5 MB at the limit. Latency and
+payload-size measurements use fixed logarithmic histograms.
+
+Rate is limited to 1,000,000 requests/second; scheduling windows,
 request timeouts and drain graces are at most 24 hours; batch size is 1–10,000,
 workers 1–1,024, workers × batch size at most 1,000,000, pending descriptors at
 most 1,000,000, and response prefixes at most 1 MiB. These are resource limits,
@@ -167,12 +174,11 @@ sum by (le) (increase(alertreceiver_alert_duration_seconds_bucket[10m]))
 ```
 
 Account for scrape timing, resets and extrapolation when comparing counters.
-By default, the tool makes no verification requests; the optional Phase 2 checks
-below require explicit flags. Real Alertmanager API traffic and real-time
+By default, the tool makes no verification requests; the optional checks below
+require explicit flags. Real Alertmanager API traffic and real-time
 lifecycle sleeps remain out of scope.
 
-
-## Phase 2: weighted profiles and scenario files
+## Weighted profiles and scenario files
 
 ```bash
 go run ./cmd/alertload \
@@ -201,7 +207,7 @@ Homogeneous request batches can be interleaved with other statuses in that round
 A round completes and drains before any dependent step is scheduled. Sparse later
 rounds retain their scheduling window; completely empty rounds are skipped.
 
-The new profiles deliberately exercise these expected outcomes:
+The stale, reopen and supersede profiles exercise these expected outcomes:
 
 - `stale`: opened, stale_firing, stale_resolved, closed. Its initial firing belongs
   to generation 1; generation 0 notifications arrive later and must be ignored.
@@ -212,11 +218,12 @@ The new profiles deliberately exercise these expected outcomes:
 
 Generation 1 retains the same fingerprint/labels and has startsAt equal to
 generation 0 startsAt plus its synthetic resolution duration plus one second.
-Only startsAt/endsAt change between generations. Every dependent Phase 2 step is
-conservatively gated on **all preceding steps in that profile returning 2xx**.
-This includes repeated/stale steps: a failure reduces later coverage instead of
-making an authoritative assumption about the receiver. Existing standalone Phase
-1 profiles keep their original gating behavior. No failed request is retried.
+Only startsAt/endsAt change between generations. In mixed workloads and the
+standalone stale, reopen and supersede scenarios, every dependent step requires
+**all preceding steps for that cohort to return 2xx**. This includes repeated
+and stale notifications: a failure reduces later coverage. Standalone lifecycle
+and duplicates scenarios use the firing/resolution success rules described
+above. No failed request is retried.
 
 Use `-scenario-file` to load weighted profiles from
 [JSON](examples/alertload-mixed.json) or [CSV](examples/alertload-mixed.csv):
@@ -241,11 +248,11 @@ profiles produce the same plan independently of input row order.
 
 Per-profile durations are reflected in the report's expected count, sum, and
 cumulative histogram buckets, including zero and greater-than-seven-day values.
-The existing `occurrences_planned` field counts initial fingerprint cohorts;
+The `occurrences_planned` field counts initial fingerprint cohorts;
 `occurrence_generations_planned` counts distinct fingerprint/startsAt generations
 that appear in the full plan (including deliberately stale generations).
-`workloads`, per-phase `profiles`, expected outcomes and verification results are
-additive JSON schema version 1 fields.
+The JSON report uses schema version 1 and includes `workloads`, per-phase
+`profiles`, expected outcomes and results for any requested verification checks.
 
 **Timestamp warning:** a reopen/supersede profile may place its final resolved
 record at `base-time + 2 × resolve-after + 1s`, plus the tiny per-alert nanosecond
