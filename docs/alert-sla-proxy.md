@@ -13,7 +13,7 @@ eligibility and active-interval overlap. It supports three explicitly selected m
 There is no Alertmanager API verification, silence/inhibition recheck, invented
 freshness timeout. Delivery is explicitly enabled; keep existing operational
 notification routes until the new destinations are verified. See the
-[Phase 3 guide](sla-proxy-phase3.md), [durable example](examples/alert-sla-proxy-durable.yaml)
+[Phase 3 guide](specifications/sla-proxy-phase3.md), [durable example](examples/alert-sla-proxy-durable.yaml)
 and [logging delivery example](examples/alert-sla-proxy-delivery-log.yaml).
 
 The calendar/lifecycle evidence tables below describe **Phase 2 observe_only
@@ -325,7 +325,7 @@ requests for at most shutdown_timeout. Expiry force-closes connections and exits
 nonzero. Listener failures, including occupied ports, also exit nonzero.
 HTTP header/read/write/idle timeouts are 5/10/15/60 seconds.
 
-Adapt the design's [fan-out route example](sla-proxy-design.md#3-alertmanager-routing-and-input-contract)
+Adapt the design's [fan-out route example](specifications/sla-proxy-design.md#3-alertmanager-routing-and-input-contract)
 to your existing routing tree. Set `send_resolved: true` for each webhook and
 keep `continue: true` on the selected SLA child route followed by an unconditional
 operational/log receiver route. A parent's receiver is a fallback, not automatic
@@ -333,7 +333,7 @@ fan-out. Verify the final configuration with `amtool check-config` and a real
 Alertmanager integration before deployment; httptest tests exercise the proxy,
 not Alertmanager routing itself.
 
-See the [decision register](sla-proxy-decisions.md) for architecture reuse and
+See the [decision register](specifications/sla-proxy-decisions.md) for architecture reuse and
 approval gates. Phase 3 durable state/scheduling is described in its separate
 guide. Multi-sink delivery is described below; real enrichment remains outside scope.
 
@@ -615,7 +615,7 @@ quarantine the namespace on command failures; readiness fails and workers stop.
 Valkey cannot roll back runtime command errors: hostile/out-of-contract type
 changes can partially commit an EXEC. Such work is never acknowledged as complete.
 Keep exclusive schema ownership and follow the fence-first administrative repair
-protocol in the [hardening guide](sla-proxy-hardening.md). Missing/wrong memberships
+protocol in the [hardening guide](specifications/sla-proxy-hardening.md). Missing/wrong memberships
 and scores are repaired without rewriting unchanged source records, renewing leases
 or changing source timestamps/versions. Orphan and cross-sink index entries are removed.
 
@@ -689,6 +689,6 @@ outcomes, never fingerprints, URLs, usernames or alert labels. A sink success wi
 an unconfirmed receipt can increment attempts without a corresponding receipt
 counter. A lost EXEC reply can also undercount actual persisted receipts.
 
-See [Phase 4B validation and benchmarks](sla-proxy-phase4b-validation.md) for measured
+See [Phase 4B validation and benchmarks](specifications/sla-proxy-phase4b-validation.md) for measured
 results and remaining production validation. Real enrichment, routing rules,
 sink editing/redrive APIs and downstream processing guarantees remain outside scope.

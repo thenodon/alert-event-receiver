@@ -550,7 +550,7 @@ quarantines the namespace and does not acknowledge successful processing. Stop
 instances, preserve/back up data, install a fresh maintenance fence generation
 before repair, restore declared index types, install the ready fence with the new
 generation, then restart. Follow the complete
-[fence-first repair procedure](sla-proxy-hardening.md#transactions-and-the-schema-ownership-contract).
+[fence-first repair procedure](specifications/sla-proxy-hardening.md#transactions-and-the-schema-ownership-contract).
 Missing memberships/scores are reconciled without rewriting unchanged occurrences
 or renewing active leases. Missing/incorrect/orphan discovery entries are repaired
 eventually; do not delete source records to clear queue counts.

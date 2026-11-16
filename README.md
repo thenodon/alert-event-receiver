@@ -288,8 +288,8 @@ for multi-sink YAML, ServiceNow setup, recovery, metrics and security.
 HTTP 2xx means API acceptance, not completed ServiceNow processing.
 
 See the [service guide](docs/alert-sla-proxy.md),
-[Phase 3 implementation and operations](docs/sla-proxy-phase3.md), and
-[decision register](docs/sla-proxy-decisions.md).
+[Phase 3 implementation and operations](docs/specifications/sla-proxy-phase3.md), and
+[decision register](docs/specifications/sla-proxy-decisions.md).
 
 ## Load testing
 
