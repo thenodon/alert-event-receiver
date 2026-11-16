@@ -1,6 +1,15 @@
 # Redis/Valkey storage and debugging
 
-This document describes the Redis/Valkey **working state** used by `alert-event-receiver`, how to inspect it, and how to diagnose duplicate, stale, or missing lifecycle events. Full historical event records are **not** stored in Redis/Valkey; they are exported as OTLP logs.
+This document covers two independent services sharing a Redis/Valkey-compatible
+backend. Sections 1–8 describe the **working state** of `alert-event-receiver`;
+its historical lifecycle events are exported as OTLP logs. The
+[Alert SLA Proxy section](#alert-sla-proxy-keys-and-debugging) describes its durable
+occurrences, delivery receipts, configuration registries and recovery.
+
+**Configuration changes normally require no key deletion.** Use the
+[configuration-change table](#configuration-changes-and-key-deletion) before
+changing the SLA proxy's epoch, destination registry or namespace. The two
+services have different key families and reliability contracts.
 
 For setup and general architecture, see [README](../README.md).
 
@@ -280,3 +289,271 @@ correlation. Batch exporter errors deliberately have no event_id. The new
 `alertreceiver_otlp_export_requests_total{result="error"}` reports failed exporter
 calls, not rollback of Valkey state or confirmed permanent loss of every record
 in a batch. See [delivery metrics and limitations](../README.md#delivery-semantics-and-failure-handling).
+
+## Alert SLA Proxy keys and debugging
+
+These keys belong to `alert-sla-proxy`, independently of the receiver's
+`alertstate:*` and `alertidemp:*`. They exist only in durable modes. Examples use
+Valkey database 0 and `durable.valkey.namespace: sla`; substitute your configured
+host, port, database and namespace. `redis-cli` supports the same commands as
+`valkey-cli` here. Use deployment-approved authentication/TLS settings.
+
+The prefix `sla:{sla}:` consists of the configured namespace `sla`, the literal
+hash tag `{sla}`, and the key suffix. The hash tag places transaction keys in the
+same Valkey Cluster slot. It does not imply that the current single-primary
+client supports Cluster discovery, MOVED handling or Sentinel failover.
+
+### Three control keys created at startup
+
+A successful first durable startup creates these shared control records, even
+before an alert is accepted. Normal restarts retain them.
+
+| Key | Type | Meaning | Routine deletion? |
+|---|---|---|---|
+| `sla:{sla}:index-schema` | String containing JSON | Active index protocol, readiness and schema generation | No |
+| `sla:{sla}:policies` | String containing JSON | Active configuration epoch and catalog digest | No |
+| `sla:{sla}:destinations` | String containing JSON | Registered logical destination IDs and fingerprints | No |
+
+Example `index-schema`:
+
+```json
+{"version":1,"state":"ready","generation":"cfb3ca66f88ca34b434010b5afab0985"}
+```
+
+- `version`: internal index-schema protocol version, not the binary release,
+  occurrence format version or policy epoch.
+- `state`: `ready` permits processing. `maintenance` fences operations during
+  coordinated repairs; detected corruption can set `quarantined`.
+- `generation`: opaque identity for this schema generation. Running processes
+  retain the exact expected fence. A changed version, state or generation stops
+  incompatible operations; they do not adopt a repaired generation automatically.
+  A generation is not regenerated on each normal restart.
+
+Example `policies`:
+
+```json
+{"epoch":1,"digest":"32d45fda0f67d40ce0c88c5d62239619caaabff648f708701b088c6d324f167b"}
+```
+
+- `epoch`: the positive operator-controlled `durable.policy_epoch`. Increase it
+  to explicitly activate supported configuration changes. A lower epoch is
+  rejected; the same epoch with a different digest is rejected.
+- `digest`: deterministic fingerprint of ordered SLA namespaces, their policy
+  versions, sink catalog, delivery enablement and store protocol. Individual
+  policy versions also include policy rules, evaluation horizon and calendar
+  provider/rule versions. This is not a hash of every YAML option.
+- A newly activated epoch/catalog fences older instances through readiness and
+  transaction checks. Coordinate the rollout across all instances using this
+  namespace. An epoch increment does not migrate records or repair missing keys.
+
+Example `destinations`:
+
+```json
+{"audit":"c19963290b35a5810a7780ba0ed2747e4621bb37d741f11a50eab3845c5d40e5","servicenow":"dbfc29de017e47355579268168208dda871869ad9963e12515c18641948821d3"}
+```
+
+Each property is a stable sink ID, not a sink type. Its SHA-256 fingerprint covers
+sink configuration: type, HTTP URL/query, HTTP timeout, credential references/modes
+and idempotency-header setting. Literal and resolved credential **values** are
+excluded; raw URLs, usernames and passwords are not stored in this registry.
+Switching authentication references/modes still changes configuration identity.
+
+The registry is append-only: existing IDs must retain their fingerprints.
+Changing/removing a registered destination fails startup even with a higher
+epoch and even if its work appears complete. This prevents queued notifications
+from being redirected or discarded. There is no retirement/migration/redrive API.
+
+### Occurrences, indexes and leases
+
+All keys below use the same `sla:{sla}:` prefix:
+
+| Suffix | Type | Contents and purpose |
+|---|---|---|
+| `occ:<occurrence_id>` | String, JSON | Authoritative occurrence: original alert/group data, lifecycle, policy bindings, eligibility, intents, retries, claims and receipts |
+| `claim:<occurrence_id>` | Expiring string | SLA scheduler ownership token; matching fence/deadline are in the occurrence |
+| `due` | Sorted set | Occurrence IDs awaiting scheduler work or claim recovery |
+| `retention` | Sorted set | Occurrence IDs due for payload compaction/tombstone deletion |
+| `unresolved` | Set | Known-firing occurrence IDs |
+| `pending` | Set | Firing occurrence IDs with a binding pending SLA eligibility |
+| `held` | Set | Occurrence IDs with a lifecycle/policy binding hold |
+| `intent-index` | Set | Occurrence IDs with ready, uncanceled intents; not a receipt or due-only queue |
+| `delivery-claim:<occurrence_id>:<binding_id>` | Expiring string | One binding's delivery ownership token |
+| `delivery-due` | Sorted set | Binding work IDs due for delivery/retry or expired-claim recovery |
+| `delivery-ready` | Set | Queued binding work, including retry-delayed work without an active claim |
+| `delivery-claimed` | Set | Persisted binding claims, including expired claims awaiting recovery |
+| `delivery-held` | Set | Bindings with permanent delivery failures or relevant policy/destination holds |
+| `delivery-pending:<sink_id>` | Set | Queued binding work for one sink, including retry delay |
+| `delivery-inflight:<sink_id>` | Set | Persisted delivery claims for one sink |
+| `delivery-failed:<sink_id>` | Set | Held delivery bindings for one sink |
+
+An occurrence ID hashes the original fingerprint and canonical UTC RFC3339Nano
+startsAt. Binding IDs include occurrence, SLA label/value and sink ID. Each
+firing/resolved intent ID includes occurrence, binding and action. A delivery
+index member is `<occurrence_id>:<binding_id>`; lifecycle indexes use occurrence
+IDs alone. These identities preserve nanoseconds, independent of arrival time.
+
+Sorted-set scores are Unix epoch milliseconds, rounded up only for fractional
+milliseconds so work never runs before its exact deadline. Authoritative JSON
+keeps precise timestamps. A delivery claim's score can represent lease expiry,
+not a first SLA opening. Index names do not by themselves prove a sink call ran.
+
+The occurrence freezes the full sink set on first durable acceptance, including
+initially pending SLA occurrences. Each binding independently holds firing and
+resolved receipts. Look for `bindings.<binding_id>.intents.firing.receipt` or
+`resolved.receipt` in JSON: `eligibility: eligible`, `pending_delivery` or a claim
+alone does not mean successful delivery. A resolved receipt requires that same
+sink's firing receipt. HTTP 2xx is API acceptance, not confirmed backend processing.
+
+Occurrence/control keys normally have `TTL = -1`. Occurrence retention is handled
+by the maintenance worker and `retention` index, not a native row TTL. Unresolved
+occurrences have no automatic expiration. Default resolved payload retention is
+30 days and tombstone retention is 90 days after first recorded resolution;
+stored deadlines are `compact_at`/`delete_at`. Outstanding/held delivery pins
+required state beyond these deadlines. Tombstone expiry limits old replay protection.
+Claim tokens have real TTLs; expiry permits another worker to recover work using
+fencing. Do not delete a token manually to force another delivery attempt.
+
+Empty sets/sorted sets may not exist at all. They are created when needed and
+Valkey removes them after their last member is removed. Their absence after a
+clean startup is normal; missing control records in an initialized namespace is
+not. Secondary indexes are repairable from occurrence documents; source records
+and delivery receipts cannot be reconstructed from indexes.
+
+### Read-only inspection commands
+
+Inspect control records and expected types:
+
+```bash
+valkey-cli -n 0 GET 'sla:{sla}:index-schema'
+valkey-cli -n 0 GET 'sla:{sla}:policies'
+valkey-cli -n 0 GET 'sla:{sla}:destinations'
+valkey-cli -n 0 TYPE 'sla:{sla}:delivery-due'
+valkey-cli -n 0 --scan --pattern 'sla:{sla}:occ:*'
+```
+
+Inspect bounded samples and queue counts:
+
+```bash
+valkey-cli -n 0 SCARD 'sla:{sla}:unresolved'
+valkey-cli -n 0 SCARD 'sla:{sla}:pending'
+valkey-cli -n 0 SCARD 'sla:{sla}:held'
+valkey-cli -n 0 ZRANGE 'sla:{sla}:due' 0 9 WITHSCORES
+valkey-cli -n 0 ZRANGE 'sla:{sla}:delivery-due' 0 9 WITHSCORES
+valkey-cli -n 0 SSCAN 'sla:{sla}:delivery-pending:servicenow' 0 COUNT 20
+valkey-cli -n 0 SCARD 'sla:{sla}:delivery-inflight:servicenow'
+valkey-cli -n 0 SCARD 'sla:{sla}:delivery-failed:servicenow'
+```
+
+SCAN/SSCAN counts are hints: follow returned cursors to finish a scan. ZRANGE
+above shows the earliest scores, which may still be in the future. Compare them
+with Valkey `TIME`, not a differently configured local clock.
+
+Use IDs from structured transition/delivery logs or discovered keys:
+
+```bash
+OCC_ID='replace-with-occurrence-id'
+BINDING_ID='replace-with-binding-id'
+valkey-cli -n 0 --raw GET "sla:{sla}:occ:$OCC_ID"
+valkey-cli -n 0 PTTL "sla:{sla}:claim:$OCC_ID"
+valkey-cli -n 0 PTTL "sla:{sla}:delivery-claim:$OCC_ID:$BINDING_ID"
+valkey-cli -n 0 ZSCORE 'sla:{sla}:delivery-due' "$OCC_ID:$BINDING_ID"
+```
+
+Occurrence JSON contains original labels, annotations and notification metadata;
+treat output as sensitive. Do not paste full payloads into public diagnostics.
+The registry fingerprints do not contain those payloads or credential values.
+
+### Configuration changes and key deletion
+
+**No routine configuration change requires deleting individual keys.** Restart
+with supported configuration changes, use an explicit higher epoch where needed,
+and retain authoritative occurrences, receipts and registries together.
+
+| Change | Increase `policy_epoch`? | Delete keys? / required action |
+|---|---|---|
+| Restart with identical configuration | No | No; recover existing work |
+| SLA schedule, timezone, holidays, policy addition/removal, namespace selection order or evaluation horizon | Yes | No; affected pinned policy bindings are held, not migrated; new occurrences use active policy selection |
+| Add a new uniquely named sink while retaining existing sinks unchanged | Yes | No; only new occurrences gain that binding, including when older occurrences are still pending SLA |
+| Enable/disable `delivery.enabled` | Yes | No; disabling pauses dispatch and preserves prepared/authorized work |
+| Change an existing sink's type, URL/query, HTTP timeout, auth reference/mode or idempotency setting | An increment is insufficient | No deletion workaround; startup rejects the changed fingerprint. Restore the registered configuration. A new sink ID may be added, but existing work is not transferred to it |
+| Remove/rename a registered sink | An increment is insufficient | Keep its registered configuration; removal/rename is rejected. Retirement/migration is not implemented |
+| Rotate literal username/password values or values supplied by the same `${NAME}` references | No | No; restart to load the new values. Permanent failures are not automatically redriven |
+| Change shared dispatcher/scheduler workers, batch size, polling, backoff or lease budgets | No | No; restart with valid timeout/lease relationships. Existing stored claims/retry deadlines remain authoritative |
+| Change listen address, webhook path, body limit or shutdown timeout | No | No; restart with validated configuration |
+| Change completed/tombstone retention settings | No | No; existing stored resolution deadlines are not rewritten; new resolution acceptance uses the new durations |
+| Change Valkey connection/authentication while reaching the same database/namespace | No | No; retain access to the same state and restart |
+| Use another Valkey database, namespace or empty server | Not a migration mechanism | No automatic transfer. It is a separate state domain; pending work and replay protection do not follow it |
+| Missing control registry or unsupported development record format | An increment cannot repair it | For disposable development data use a new unused namespace. Otherwise restore consistent state from backups; no automatic schema migration |
+| Corrupt index types/quarantined schema | No epoch-only fix | Coordinated fence-first repair; preserve authoritative records/receipts/registries. Do not clear the schema key to bypass quarantine |
+
+The policy catalog digest deliberately excludes runtime tuning options, but HTTP
+**per-sink** timeout is part of destination identity. The shared dispatcher
+`delivery_timeout` is runtime tuning, subject to startup lease validation. Calendar
+provider/rule upgrades can change policy versions and therefore require a higher
+epoch and a reviewed rollout even if YAML schedules are unchanged.
+
+A higher epoch activates a compatible new catalog; it does not bypass immutable
+destinations, migrate frozen bindings, remove policy holds, erase receipts or fix
+missing/corrupt state. Restoring the exact pinned policy under a higher epoch can
+release its hold. Changing to a different policy version cannot silently reinterpret
+historical eligibility. Merely reordering sink entries does not change their
+ID-to-fingerprint catalog; SLA definition order does affect first-match selection.
+
+For the separate **event receiver**, changing OTLP exporter settings does not
+require deleting `alertstate:*` or `alertidemp:*`. Deleting them is not a delivery
+retry mechanism and can cause duplicate or misclassified lifecycle events.
+Changing `CLOSED_STATE_TTL` or `IDEMPOTENCY_TTL` affects newly applied expirations;
+it does not retroactively rewrite existing TTLs. Changing that service's Valkey
+database/server similarly starts a separate state domain unless data is preserved.
+
+### Incomplete registry, corruption and development reset
+
+For `incomplete configuration registry`, check presence separately:
+
+```bash
+valkey-cli -n 0 EXISTS 'sla:{sla}:policies'
+valkey-cli -n 0 EXISTS 'sla:{sla}:destinations'
+```
+
+Both should exist after successful startup. If one exists without the other,
+older development data, manual deletion or data loss are possible causes. Do not
+create a replacement destination map from current YAML: outstanding intents may
+belong to different historical destinations. Do not delete only `policies`,
+`destinations` or `index-schema` to make startup pass. Restore registries and
+occurrences from a consistent backup when work must be preserved.
+
+For **disposable development state**, stop all instances using the old namespace,
+select a new unused namespace and restart:
+
+```yaml
+durable:
+  valkey:
+    namespace: sla-dev-clean-1
+```
+
+This starts empty; it preserves the old keys, but does not carry over pending
+notifications, tombstones, authorization evidence or receipts. Replaying old
+webhooks in the new namespace can generate new deliveries. Do not run both old
+and new namespaces against the same production notification stream as an
+accidental reset strategy.
+
+If intentionally deleting abandoned development data later, delete only the
+explicitly chosen old SLA namespace after stopping its users and deciding its
+work is disposable. This is a whole-state reset, not a configuration update.
+Never use `FLUSHDB`/`FLUSHALL` on a shared backend or remove the receiver's
+`alertstate:*`/`alertidemp:*` as part of SLA proxy cleanup. This guide performs no
+key deletion and supplies no automatic reset script.
+
+For wrong-type index corruption, ordinary MULTI/EXEC has no runtime-error rollback:
+a failed index command can coexist with a successful source write. The application
+quarantines the namespace and does not acknowledge successful processing. Stop
+instances, preserve/back up data, install a fresh maintenance fence generation
+before repair, restore declared index types, install the ready fence with the new
+generation, then restart. Follow the complete
+[fence-first repair procedure](sla-proxy-hardening.md#transactions-and-the-schema-ownership-contract).
+Missing memberships/scores are reconciled without rewriting unchanged occurrences
+or renewing active leases. Missing/incorrect/orphan discovery entries are repaired
+eventually; do not delete source records to clear queue counts.
+
+See the [SLA proxy service guide](alert-sla-proxy.md#multi-sink-delivery-phase-4b)
+for delivery ordering, retries, at-least-once crash windows and per-sink metrics.

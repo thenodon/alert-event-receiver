@@ -58,8 +58,8 @@ func TestHTTPSinkPayloadAuthAndStableIntent(t *testing.T) {
 	}))
 	defer server.Close()
 	sink := testHTTPSink(t, server.URL+"/webhook?source=prometheus", time.Second)
-	sink.config.BasicAuth.UsernameEnv = "TEST_SINK_USER"
-	sink.config.BasicAuth.PasswordEnv = "TEST_SINK_PASSWORD"
+	sink.config.BasicAuth.Username = "${TEST_SINK_USER}"
+	sink.config.BasicAuth.Password = "${TEST_SINK_PASSWORD}"
 	var logs bytes.Buffer
 	var err error
 	sink, err = newHTTPSink(sink.config, sink.client, slog.New(slog.NewJSONHandler(&logs, nil)), nil)
@@ -223,13 +223,13 @@ func TestRetryAfterAndCredentialValidation(t *testing.T) {
 		}
 	}
 	cfg := HTTPSinkConfig{}
-	cfg.BasicAuth.UsernameEnv = "NONEXISTENT_SINK_USERNAME"
-	cfg.BasicAuth.PasswordEnv = "NONEXISTENT_SINK_PASSWORD"
+	cfg.BasicAuth.Username = "${NONEXISTENT_SINK_USERNAME}"
+	cfg.BasicAuth.Password = "${NONEXISTENT_SINK_PASSWORD}"
 	if _, err := newHTTPSink(cfg, nil, nil, nil); err == nil {
 		t.Fatal("accepted missing credentials")
 	}
-	t.Setenv(cfg.BasicAuth.UsernameEnv, "secret:user")
-	t.Setenv(cfg.BasicAuth.PasswordEnv, "secret-password")
+	t.Setenv("NONEXISTENT_SINK_USERNAME", "secret:user")
+	t.Setenv("NONEXISTENT_SINK_PASSWORD", "secret-password")
 	if _, err := newHTTPSink(cfg, nil, nil, nil); err == nil || strings.Contains(err.Error(), "secret") {
 		t.Fatal("invalid credentials not safely rejected", err)
 	}

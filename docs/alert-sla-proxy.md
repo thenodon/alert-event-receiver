@@ -340,6 +340,9 @@ guide. Multi-sink delivery is described below; real enrichment remains outside s
 
 ## Multi-sink delivery (Phase 4B)
 
+For key layouts, inspection commands and configuration-change/reset rules, see
+[Redis/Valkey debugging](redis-debugging.md#alert-sla-proxy-keys-and-debugging).
+
 A `Sink.Deliver(context.Context, DeliveryEvent) error` implementation performs one
 external operation. It knows nothing about Valkey or scheduling. The existing
 dispatcher owns claims, authorization, retries, ordering and receipts. Supported
@@ -392,8 +395,8 @@ delivery:
         url: https://sn.acme.se/api/sn_em_connector/em/inbound_event?source=prometheus
         timeout: 10s
         basic_auth:
-          username_env: SERVICENOW_USERNAME
-          password_env: SERVICENOW_PASSWORD
+          username: "${SERVICENOW_USERNAME}"
+          password: "${SERVICENOW_PASSWORD}"
         idempotency_key: true
     - id: audit
       type: log
@@ -418,8 +421,13 @@ Delivery defaults to disabled. The native default sink list is one `default` log
 sink. Explicit durable configuration must contain 1–32 sinks with unique stable
 IDs matching `[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}`. Unknown types/fields, duplicate
 IDs, malformed URLs, userinfo/fragments, missing authentication variables and
-invalid timeouts fail startup. Both credential variable names must be provided
-together. Values must be nonempty; username colons and credential CR/LF are
+invalid timeouts fail startup. Both `username` and `password` must be provided
+together. Each accepts a literal value or an exact `${NAME}` environment reference.
+They may be mixed (a literal username and an environment password). Missing/empty
+referenced variables fail startup. Partial interpolation such as `prefix${NAME}`
+and malformed references are rejected; resolved values are not expanded recursively.
+Expansion applies only to these Basic Authentication fields, not the whole YAML.
+Values must be nonempty; username colons and credential CR/LF are
 rejected. All configured sinks are validated even when dispatch is disabled.
 
 HTTP timeout must be positive and no greater than `dispatcher.delivery_timeout`.
@@ -440,9 +448,10 @@ binding. The occurrence remains the single authoritative lifecycle document.
 
 An immutable `destinations` registry stores sink IDs and SHA-256 configuration
 fingerprints. It stores no credential values. Fingerprints include type, URL
-(including query), timeout, authentication variable names and idempotency-header
-setting. Rotating credential **values** is supported on restart without changing
-identity. Changing any fingerprint field or removing a registered sink fails
+(including query), timeout, authentication references/modes and idempotency-header
+setting. Rotating credential **values**, literal or environment-supplied, is supported
+on restart without changing identity. Literal credentials are excluded from the
+fingerprint; protect the configuration file when storing them directly. Changing any fingerprint field or removing a registered sink fails
 startup, even if its known work has completed. This conservative append-only rule
 prevents accidental discard/redirection; automated retirement/redrive is outside
 this phase. Do not delete registry entries to bypass it.
@@ -460,6 +469,18 @@ This release uses the new `delivery.sinks` YAML and occurrence format 2 directly
 `durable.sink_id` and `delivery.sink` are rejected. There is no legacy schema
 adoption, migration or compatibility path. Development data from earlier formats
 requires a deliberately separate/empty namespace, not an in-place upgrade.
+
+If startup reports an **incomplete configuration registry**, one of
+`<namespace>:{sla}:policies` and `<namespace>:{sla}:destinations` exists while the
+other is missing. Earlier development formats or missing store data can cause
+this. Increasing `policy_epoch` approves configuration changes; it cannot create
+missing registry history or migrate stored records. For disposable development
+data, choose a new, unused `durable.valkey.namespace` and restart. This starts
+empty lifecycle/delivery state and leaves the old namespace untouched. If pending
+work must be retained, restore the registry from a consistent backup; do not
+fabricate a destination registry from current configuration or delete only the
+policy key to bypass validation.
+
 
 ### HTTP payload and security
 

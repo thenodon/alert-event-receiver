@@ -149,10 +149,10 @@ func TestMultiSinkConfiguration(t *testing.T) {
 		"missing HTTP":   func(d *DeliveryConfig) { d.Sinks[0].HTTP = nil },
 		"zero timeout":   func(d *DeliveryConfig) { d.Sinks[0].HTTP.Timeout = 0 },
 		"excess timeout": func(d *DeliveryConfig) { d.Sinks[0].HTTP.Timeout = time.Hour },
-		"partial auth":   func(d *DeliveryConfig) { d.Sinks[0].HTTP.BasicAuth.UsernameEnv = "USER" },
+		"partial auth":   func(d *DeliveryConfig) { d.Sinks[0].HTTP.BasicAuth.Username = "USER" },
 		"invalid env": func(d *DeliveryConfig) {
-			d.Sinks[0].HTTP.BasicAuth.UsernameEnv = "bad-env"
-			d.Sinks[0].HTTP.BasicAuth.PasswordEnv = "PASS"
+			d.Sinks[0].HTTP.BasicAuth.Username = "${bad-env}"
+			d.Sinks[0].HTTP.BasicAuth.Password = "PASS"
 		},
 		"log HTTP settings": func(d *DeliveryConfig) { d.Sinks[0].Type = "log" },
 	} {
@@ -200,7 +200,7 @@ func TestHTTPDeliveryConfigurationExample(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Delivery.Enabled || len(cfg.Delivery.Sinks) != 2 || cfg.Delivery.Sinks[0].Type != "http" || cfg.Delivery.Sinks[0].HTTP.BasicAuth.UsernameEnv != "SERVICENOW_USERNAME" || cfg.Delivery.Sinks[1].Type != "log" {
+	if !cfg.Delivery.Enabled || len(cfg.Delivery.Sinks) != 2 || cfg.Delivery.Sinks[0].Type != "http" || cfg.Delivery.Sinks[0].HTTP.BasicAuth.Username != "${SERVICENOW_USERNAME}" || cfg.Delivery.Sinks[1].Type != "log" {
 		t.Fatal("invalid multi-sink example")
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -40,11 +39,11 @@ func newDeliveryHTTPClient(workers int) (*http.Client, *http.Transport) {
 }
 func newHTTPSink(cfg HTTPSinkConfig, client *http.Client, logger *slog.Logger, metrics *deliveryMetrics) (*HTTPSink, error) {
 	sink := &HTTPSink{config: cfg, client: client, logger: logger, metrics: metrics}
-	if cfg.BasicAuth.UsernameEnv != "" {
-		var userOK, passwordOK bool
-		sink.username, userOK = os.LookupEnv(cfg.BasicAuth.UsernameEnv)
-		sink.password, passwordOK = os.LookupEnv(cfg.BasicAuth.PasswordEnv)
-		if !userOK || !passwordOK || sink.username == "" || sink.password == "" || strings.ContainsAny(sink.username, ":\r\n") || strings.ContainsAny(sink.password, "\r\n") {
+	if cfg.BasicAuth.Username != "" || cfg.BasicAuth.Password != "" {
+		var userErr, passwordErr error
+		sink.username, userErr = resolveCredential(cfg.BasicAuth.Username)
+		sink.password, passwordErr = resolveCredential(cfg.BasicAuth.Password)
+		if userErr != nil || passwordErr != nil || sink.username == "" || sink.password == "" || strings.ContainsAny(sink.username, ":\r\n") || strings.ContainsAny(sink.password, "\r\n") {
 			return nil, errors.New("HTTP Basic Authentication credentials are missing or invalid")
 		}
 	}

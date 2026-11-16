@@ -318,8 +318,8 @@ type HTTPSinkConfig struct {
 	URL       string        `yaml:"url"`
 	Timeout   time.Duration `yaml:"timeout"`
 	BasicAuth struct {
-		UsernameEnv string `yaml:"username_env"`
-		PasswordEnv string `yaml:"password_env"`
+		Username string `yaml:"username"`
+		Password string `yaml:"password"`
 	} `yaml:"basic_auth"`
 	IdempotencyKey *bool `yaml:"idempotency_key,omitempty"`
 }
@@ -350,12 +350,12 @@ func (c SinkConfig) Validate(maximum time.Duration) error {
 			return fmt.Errorf("HTTP timeout must be positive and <= dispatcher.delivery_timeout")
 		}
 		auth := c.HTTP.BasicAuth
-		if (auth.UsernameEnv == "") != (auth.PasswordEnv == "") {
-			return fmt.Errorf("basic_auth requires both username_env and password_env")
+		if (auth.Username == "") != (auth.Password == "") {
+			return fmt.Errorf("basic_auth requires both username and password")
 		}
-		for _, name := range []string{auth.UsernameEnv, auth.PasswordEnv} {
-			if name != "" && !labelName.MatchString(name) {
-				return fmt.Errorf("invalid credential environment-variable name")
+		for _, value := range []string{auth.Username, auth.Password} {
+			if _, _, err := credentialReference(value); err != nil {
+				return err
 			}
 		}
 	default:
@@ -364,6 +364,14 @@ func (c SinkConfig) Validate(maximum time.Duration) error {
 	return nil
 }
 func (c SinkConfig) fingerprint() string {
+	// Fingerprint destination settings and credential references, never credential
+	// values. Literal secrets can rotate without redirecting queued deliveries.
+	if c.HTTP != nil {
+		httpConfig := *c.HTTP
+		httpConfig.BasicAuth.Username = credentialIdentity(httpConfig.BasicAuth.Username)
+		httpConfig.BasicAuth.Password = credentialIdentity(httpConfig.BasicAuth.Password)
+		c.HTTP = &httpConfig
+	}
 	encoded, _ := json.Marshal(c)
 	return tupleID(string(encoded))
 }

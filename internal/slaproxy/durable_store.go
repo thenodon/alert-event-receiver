@@ -132,7 +132,11 @@ func (s *DurableStore) activate(ctx context.Context) (err error) {
 				return err
 			}
 			if policyPresent != (err == nil) {
-				return fmt.Errorf("incomplete configuration registry; operator repair required")
+				missing, present := catalogKey, policyKey
+				if !policyPresent {
+					missing, present = policyKey, catalogKey
+				}
+				return fmt.Errorf("incomplete configuration registry: %q exists but %q is missing; increasing durable.policy_epoch does not repair stored state; for disposable development data use a new durable.valkey.namespace, otherwise restore the missing registry from a consistent backup", present, missing)
 			}
 			if err == nil {
 				var registered map[string]string

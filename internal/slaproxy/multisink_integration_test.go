@@ -248,8 +248,8 @@ func TestMultiSinkCatalogFreezeAndChanges(t *testing.T) {
 			case "type":
 				bad.Delivery.Sinks[0] = SinkConfig{ID: "servicenow", Type: "log"}
 			case "auth-env":
-				bad.Delivery.Sinks[0].HTTP.BasicAuth.UsernameEnv = "TEST_MULTI_USER"
-				bad.Delivery.Sinks[0].HTTP.BasicAuth.PasswordEnv = "TEST_MULTI_PASSWORD"
+				bad.Delivery.Sinks[0].HTTP.BasicAuth.Username = "${TEST_MULTI_USER}"
+				bad.Delivery.Sinks[0].HTTP.BasicAuth.Password = "${TEST_MULTI_PASSWORD}"
 				t.Setenv("TEST_MULTI_USER", "user")
 				t.Setenv("TEST_MULTI_PASSWORD", "password")
 			}
@@ -603,6 +603,8 @@ func TestMultiSinkMissingRegistryCannotRedirectOutstandingWork(t *testing.T) {
 	if candidate, err := New(cfg, slog.New(slog.NewJSONHandler(io.Discard, nil))); err == nil {
 		_ = candidate.Close()
 		t.Fatal("missing registry allowed destination replacement")
+	} else if !strings.Contains(err.Error(), store.destinationKey()) || !strings.Contains(err.Error(), "policy_epoch does not repair") || !strings.Contains(err.Error(), "durable.valkey.namespace") {
+		t.Fatal("missing actionable registry diagnostic", err)
 	}
 	if store.client.Exists(ctx, store.destinationKey()).Val() != 0 || store.client.Get(ctx, store.rowKey(row.ID)).Val() != before {
 		t.Fatal("failed registry activation overwrote authoritative state")

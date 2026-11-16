@@ -254,7 +254,7 @@ pending alerts, handles out-of-order resolutions and prepares durable intent.
 With delivery disabled it never invokes a sink. Opt-in delivery supports multiple
 named log and HTTP webhook destinations, with independent durable receipts,
 retries and at-least-once attempts. HTTP requests contain one original Alertmanager
-alert; Basic Authentication credentials come from environment variables.
+alert; Basic Authentication accepts literal credentials or `${NAME}` environment references.
 
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
