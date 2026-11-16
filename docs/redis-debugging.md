@@ -555,5 +555,5 @@ Missing memberships/scores are reconciled without rewriting unchanged occurrence
 or renewing active leases. Missing/incorrect/orphan discovery entries are repaired
 eventually; do not delete source records to clear queue counts.
 
-See the [SLA proxy service guide](alert-sla-proxy.md#multi-sink-delivery-phase-4b)
+See the [SLA proxy service guide](alert-sla-proxy.md#multi-sink-delivery)
 for delivery ordering, retries, at-least-once crash windows and per-sink metrics.
