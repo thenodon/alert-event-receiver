@@ -245,30 +245,40 @@ _time:24h event.kind:alert_transition
 
 Adjust field names and stream settings to match your OTLP ingestion configuration.
 
-## Alert SLA Proxy (Phases 2–4B)
+## Alert SLA Proxy
 
 The separate `alert-sla-proxy` selects label-based SLA policies and evaluates
 weekly IANA schedules, holidays and active-interval overlap. By default it is
-stateless `observe_only`. Opt-in Phase 3 persists occurrences in Valkey, schedules
+stateless `observe_only`. Opt-in durable mode persists occurrences in Valkey, schedules
 pending alerts, handles out-of-order resolutions and prepares durable intent.
 With delivery disabled it never invokes a sink. Opt-in delivery supports multiple
 named log and HTTP webhook destinations, with independent durable receipts,
 retries and at-least-once attempts. HTTP requests contain one original Alertmanager
 alert; Basic Authentication accepts literal credentials or `${NAME}` environment references.
 
+Use the [complete configuration example](docs/examples/alert-sla-proxy.yaml),
+which includes Valkey, scheduling, retention, and both HTTP and log sinks:
+
 ```bash
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
-# Stateless observation:
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy.yaml
-# Or durable lifecycle/scheduling, with a configured persistent Valkey:
-/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-durable.yaml
-# Or enable a real logging destination:
-/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-log.yaml
-# Or generic HTTP delivery to ServiceNow plus an audit log sink (set auth env vars):
-/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-http.yaml
 ```
 
-Phase 3 trusts Alertmanager's webhook lifecycle. If an SLA opportunity arrives
+The example starts in observe-only mode. Select the desired mode in that file:
+
+| Mode | `durable.enabled` | `delivery.enabled` |
+|---|---|---|
+| Observe only | `false` | `false` |
+| Durable state and scheduling | `true` | `false` |
+| Durable state and sink delivery | `true` | `true` |
+
+Configure Valkey before enabling durable mode. Before enabling delivery, configure
+the HTTP endpoint and set the credential environment variables referenced by its
+Basic Authentication settings. Disabled delivery does not initialize runtime sinks
+or resolve HTTP credentials. Existing namespaces require a higher
+`durable.policy_epoch` when changing delivery enablement or the policy/sink catalog.
+
+Durable modes trust Alertmanager's webhook lifecycle. If an SLA opportunity arrives
 without a recorded resolution, the occurrence is considered firing in known
 state. There is no API verification, silence/inhibition recheck or invented
 freshness timeout. A delayed/lost resolution can therefore produce eligibility
@@ -286,10 +296,6 @@ fails startup. Approved catalog changes require a higher `durable.policy_epoch`.
 There is no legacy schema migration. See the [service guide](docs/alert-sla-proxy.md)
 for multi-sink YAML, ServiceNow setup, recovery, metrics and security.
 HTTP 2xx means API acceptance, not completed ServiceNow processing.
-
-See the [service guide](docs/alert-sla-proxy.md),
-[Phase 3 implementation and operations](docs/specifications/sla-proxy-phase3.md), and
-[decision register](docs/specifications/sla-proxy-decisions.md).
 
 ## Load testing
 
