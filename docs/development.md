@@ -12,6 +12,7 @@ Run from the repository root with Go 1.26.11+ (the version pinned in CI and imag
 go build -o /tmp/alert_event_receiver ./cmd/server
 go build -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
 go build -o /tmp/alertload ./cmd/alertload
+go build -o /tmp/httpsink-mock ./cmd/httpsink-mock
 ```
 
 `-version` prints the injected version, or `unknown` when not set. The two services
@@ -86,6 +87,7 @@ recorded decisions, when current behavior moves on.
 | `cmd/server` | Event receiver executable |
 | `cmd/alert-sla-proxy` | Independent SLA executable |
 | `cmd/alertload` | Webhook load generator |
+| `cmd/httpsink-mock` | Local HTTP test destination; prints full webhook payloads |
 | `internal/models` | Shared Alertmanager wire types and lifecycle event model |
 | `internal/processor`, `internal/state`, `internal/webhook` | Receiver lifecycle, working state and handler |
 | `internal/telemetry` | Receiver OTLP, SDK diagnostics and metrics |

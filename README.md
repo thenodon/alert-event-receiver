@@ -40,8 +40,8 @@ pending work, and independent named log/HTTP sinks with retries and receipts.
 ## Build and run
 
 For source builds, install **Go 1.26.11 or newer**. Getting-started examples also
-use Bash, curl and Docker for local dependencies; Python 3 is used for test
-webhooks and a local HTTP destination.
+use Bash, curl and Docker for local dependencies; Python 3 generates test
+webhooks. The local HTTP destination uses the Go mock in `cmd/httpsink-mock`.
 
 Run these commands from the repository root:
 

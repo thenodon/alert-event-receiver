@@ -14,7 +14,8 @@ you have verified the new destinations.
 
 ## Prerequisites and build
 
-Install Go 1.26.11+, Bash, curl and Python 3. Durable examples also use Docker.
+Install Go 1.26.11+, Bash and curl. Python 3 generates test webhook files; the
+HTTP mock uses Go. Durable examples also use Docker.
 Run commands from the repository root. Ports 9012, 6380 and 8080 must be free.
 
 ```bash
@@ -88,16 +89,31 @@ volume, so stopping/removing it discards this demo's storage.
 
 ## Deliver to a local HTTP destination and audit log
 
-Stop the state-only process. In a separate terminal, start the included **test
-fixture**, which accepts POSTs and prints only action, fingerprint and counts:
+Stop the state-only process. In a separate terminal, start the existing
+[Go HTTP mock](../../cmd/httpsink-mock/main.go) with local demo credentials:
 
 ```bash
-python3 docs/examples/http-sink.py
+export MOCK_USERNAME=documentation-user
+export MOCK_PASSWORD=documentation-password
+go run ./cmd/httpsink-mock -listen 127.0.0.1:8080
 ```
 
-This fixture is for local verification, not a production destination. It listens
-on loopback port 8080 and returns 202. It validates demo Basic Authentication;
-set the matching local test credentials before starting the proxy:
+The explicit listen address keeps the mock on loopback; its default is `:8080`
+(all interfaces). It accepts JSON at `/inbound_event`, returns HTTP 200, and
+exposes `/healthz`. Check it from another terminal:
+
+```bash
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+The mock prints the **full webhook payload**, including labels and annotations,
+plus status, alert count and idempotency key. Use test data only. It is a local
+verification tool, not a production destination. `-max-body` sets the request-body
+limit (default 1048576 bytes). Basic Authentication is optional when both
+`MOCK_USERNAME` and `MOCK_PASSWORD` are unset; setting only one fails startup.
+
+Set matching credentials in the proxy's terminal. The two variable names below
+are referenced by the proxy's YAML; the mock reads the separate `MOCK_*` variables:
 
 ```bash
 export SERVICENOW_USERNAME=documentation-user
@@ -109,10 +125,10 @@ The [minimal HTTP delivery example](../examples/alert-sla-proxy-delivery-http.ya
 uses Valkey on port 6380, a **different namespace** from the state-only example,
 the local HTTP endpoint, and an independent `audit` log sink. Both enable flags
 are true. Generate a fresh webhook pair. Send firing first and wait until the
-fixture prints it; then send the resolution file. Sending resolution before the
+mock prints it; then send the resolution file. Sending resolution before the
 first firing is authorized can correctly cancel delivery of both notifications.
 
-Verify the HTTP fixture output, `SLA alert delivered` audit logs and metrics:
+Verify the HTTP mock output, `SLA alert delivered` audit logs and metrics:
 
 ```bash
 curl -fsS http://127.0.0.1:9012/metrics
@@ -125,7 +141,7 @@ delivery is asynchronous. An HTTP 200 webhook response does not prove delivery.
 
 For a log-only trial, use
 [alert-sla-proxy-delivery-log.yaml](../examples/alert-sla-proxy-delivery-log.yaml)
-with the same Valkey server. It uses its own namespace and needs no HTTP fixture.
+with the same Valkey server. It uses its own namespace and needs no HTTP mock.
 Wait for the firing audit log before sending the resolution, as in the HTTP trial.
 
 Production HTTP destinations should use HTTPS and credentials from a secret
@@ -149,7 +165,7 @@ independent state domains, not migration tools. Changing an existing durable
 catalog or enabling delivery requires a higher epoch and preserves frozen
 historical destinations; see [operations](operations.md).
 
-Stop the proxy and HTTP fixture with Ctrl-C. After finishing all durable demos:
+Stop the proxy and HTTP mock with Ctrl-C. After finishing all durable demos:
 
 ```bash
 docker stop sla-demo-valkey

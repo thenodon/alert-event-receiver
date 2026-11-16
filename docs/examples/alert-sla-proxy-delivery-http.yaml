@@ -1,5 +1,6 @@
-# Local HTTP test fixture plus audit logs. Never use the demo credentials remotely.
-# Run python3 docs/examples/http-sink.py and set the two variables as in the guide.
+# Local Go HTTP mock plus audit logs. Never use the demo credentials remotely.
+# Run go run ./cmd/httpsink-mock -listen 127.0.0.1:8080 with MOCK_USERNAME/MOCK_PASSWORD.
+# Set matching SERVICENOW_USERNAME/SERVICENOW_PASSWORD for the proxy, as in the guide.
 sla_definitions:
   - sla_label: sla_id
     slas:
