@@ -118,7 +118,7 @@ func TestDocumentationExamples(t *testing.T) {
                     }
                 }
             }
-            if _, err = NewCalendarEngine(cfg, CountryHolidays{}); err != nil { t.Fatal(err) }
+            if _, err = NewCalendarEngine(cfg); err != nil { t.Fatal(err) }
         })
     }
 }

@@ -111,7 +111,7 @@ func TestIntervalEligibilityAcrossCalendarsAndDST(t *testing.T) {
 	}{
 		{"overnight", "Europe/Stockholm", "monday", "22:00-06:00", "2026-11-09T21:30:00+01:00", "2026-11-10T01:00:00+01:00", nil, EligibilityEligible},
 		{"overnight holiday", "Europe/Stockholm", "monday", "22:00-06:00", "2026-11-10T00:00:00+01:00", "2026-11-10T01:00:00+01:00", &Holidays{AdditionalDates: []string{"2026-11-10"}}, EligibilityIneligible},
-		{"public holiday", "Europe/Stockholm", "friday", "08:00-17:00", "2027-01-01T07:30:00+01:00", "2027-01-01T10:00:00+01:00", &Holidays{Country: "SE"}, EligibilityIneligible},
+		{"public holiday", "Europe/Stockholm", "friday", "08:00-17:00", "2027-01-01T07:30:00+01:00", "2027-01-01T10:00:00+01:00", &Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics"))}, EligibilityIneligible},
 		{"spring partial gap", "Europe/Stockholm", "sunday", "02:30-03:30", "2026-03-29T00:30:00Z", "2026-03-29T01:10:00Z", nil, EligibilityEligible},
 		{"spring empty gap", "Europe/Stockholm", "sunday", "02:00-02:30", "2026-03-29T00:30:00Z", "2026-03-29T01:30:00Z", nil, EligibilityIneligible},
 		{"autumn second fold", "Europe/Stockholm", "sunday", "02:15-02:45", "2026-10-25T00:50:00Z", "2026-10-25T01:20:00Z", nil, EligibilityEligible},
@@ -135,6 +135,13 @@ func TestIntervalEligibilityAcrossCalendarsAndDST(t *testing.T) {
 
 func TestWebhookSeparatesDifferentLifecycleEvidenceWithOneCalendarCall(t *testing.T) {
 	s := newTestService(t)
+	cfg := s.cfg
+	policy := cfg.SLADefinitions[0].SLAs["business"]
+	policy.Holidays.Dataset = datasetPath(fixtureDataset(t, "holidays_se.ics"))
+	cfg.SLADefinitions[0].SLAs["business"] = policy
+	e := datasetEngine(t, cfg)
+	e.metrics = s.metrics
+	s.evaluator = e
 	s.now = func() time.Time { return instant(t, "2026-11-09T09:05:00+01:00") }
 	firing := alertAt(t, "firing", "sla_id", "2026-11-09T07:30:00+01:00")
 	before := firing
@@ -153,7 +160,7 @@ func TestWebhookSeparatesDifferentLifecycleEvidenceWithOneCalendarCall(t *testin
 	if result.Policies[0].EligibilityStatus != EligibilityUnknown || result.Policies[1].EligibilityStatus != EligibilityIneligible || result.Policies[2].EligibilityStatus != EligibilityEligible || result.Policies[1].AlertCount != 2 {
 		t.Fatal(result.Policies)
 	}
-	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"country": "SE", "result": "not_holiday"}); got != 1 {
+	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"result": "not_holiday"}); got != 1 {
 		t.Fatal("calendar cache not shared", got)
 	}
 	if got := counter(t, s, "sla_proxy_alert_eligibility_observations_total", map[string]string{"sla_label": "sla_id", "sla_value": "business", "alert_status": "resolved", "eligibility_status": "eligible", "reason": "active_interval_overlaps_sla"}); got != 1 {

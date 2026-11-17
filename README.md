@@ -35,7 +35,7 @@ are independent. Alertmanager routes must use `send_resolved: true`.
 The receiver tracks the latest occurrence per fingerprint, suppresses repeated
 transition emissions, and exports over OTLP/gRPC or OTLP/HTTP. The SLA proxy
 supports weekly IANA schedules, [offline holiday datasets](docs/sla-proxy/holiday-datasets.md)
-for operator-supplied countries/subdivisions, legacy SE/DE/DE-BY calendars, durable
+for operator-supplied countries/subdivisions, explicit closure dates, durable
 pending work, and independent named log/HTTP sinks with retries and receipts.
 
 ## Build and run

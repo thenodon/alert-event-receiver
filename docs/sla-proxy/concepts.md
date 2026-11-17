@@ -82,7 +82,7 @@ merge. Enrichment remains a no-op.
 Holiday exclusions cover the entire local date being tested, including overnight
 carry. For Monday 22:00–Tuesday 06:00, a Tuesday holiday excludes Tuesday's
 carry; a Monday holiday alone does not exclude Tuesday. Explicit dates take
-precedence over dataset or legacy country checks within valid coverage. With no holidays block, only the weekly schedule
+precedence over dataset checks within valid coverage. With no holidays block, only the weekly schedule
 applies.
 
 IANA offset intervals preserve the existing DST behavior: nonexistent spring
@@ -177,7 +177,7 @@ for practical recovery and [configuration](configuration.md) for supported setti
 Each policy can select one immutable [ICS dataset](holiday-datasets.md). Its dates
 are local civil-day exclusions and its manifest explicitly asserts covered years.
 Missing coverage is an error, not a workday. The runtime has no Python, network
-provider or reload dependency. Legacy country/subdivision settings remain available.
+provider or reload dependency. Public holidays require an ICS dataset; no country-specific code is compiled in.
 
 Policy versions include the dataset's sorted date-set/coverage hash. Changed data
 or coverage requires a higher durable epoch and holds affected historical bindings;

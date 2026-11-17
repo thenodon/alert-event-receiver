@@ -30,8 +30,8 @@ are resolved once; the manifest is adjacent to the **resolved file**, named by
 appending `.json`. Policies sharing a canonical path share one immutable loaded
 set. Different policies can select different files without a global registry.
 
-Do not combine dataset with `country` or `subdivision`. Those legacy fields remain
-supported for SE, DE and DE/BY, but are compatibility-only. In dataset mode the
+The former YAML `country` and `subdivision` fields are no longer supported. Use
+`dataset` for public holidays, or `additional_dates` for explicit closures. The
 manifest's country/subdivision fields are informational. The file must already
 contain all applicable holidays; a Bavaria dataset needs nationwide and statewide
 Bavarian dates together. Municipality-specific or company closures require suitable
@@ -218,7 +218,7 @@ ambiguity and firing-before-resolved ordering are unchanged.
 | `calendar_error` on old/future input | Its evaluated local dates are outside coverage; install appropriate data rather than assuming workdays |
 | `policy_changed` after refreshing years | Coverage is semantic. Follow hold/restore guidance; an epoch bump is activation, not migration |
 
-Dataset lookups use existing `sla_proxy_holiday_evaluations_total` with the fixed
-`country="dataset"` label and existing holiday/not_holiday/error results. No path,
-hash, user-supplied country or policy name becomes a metric label. Explicit additions
-within coverage bypass dataset lookup counters as before. See [reference](reference.md).
+Dataset lookups use `sla_proxy_holiday_evaluations_total{result}` with bounded
+holiday/not_holiday/error results. The former `country` metric label has been
+removed. No path, hash, country or policy name becomes a metric label. Explicit
+additions within coverage bypass dataset lookup counters. See [reference](reference.md).

@@ -197,7 +197,7 @@ and any environment proxy settings are trusted operator configuration.
 | `sla_proxy_calendar_classifications_total` | `sla_label`, `sla_value`, `classification`, `reason` | Successful per-notification calendar classification at startsAt; inside_sla/outside_sla |
 | `sla_proxy_alert_eligibility_observations_total` | `sla_label`, `sla_value`, `alert_status`, `eligibility_status`, `reason` | Per-notification lifecycle status, including pending, unknown and error |
 | `sla_proxy_policy_errors_total` | `reason` | Failed evaluator calls; one call per unique policy pair plus exact startsAt in each batch |
-| `sla_proxy_holiday_evaluations_total` | `country`, `result` | Legacy country or dataset checks, including future search dates; dataset uses fixed country="dataset"; result = holiday/not_holiday/error |
+| `sla_proxy_holiday_evaluations_total` | `result` | ICS dataset checks, including future search dates; result = holiday/not_holiday/error |
 
 Calendar success metrics count notifications (including within-request cache
 reuse); error metrics count actual evaluator calls. In durable modes,
@@ -322,8 +322,7 @@ files fail startup. Missing date coverage propagates as `calendar_error`, never
 `not_holiday`. Observe-only evaluation failures return 500; failed new durable
 acceptance returns 503. Existing pinned lifecycle facts are retained.
 
-The existing holiday metric keeps its `{country,result}` shape. Dataset lookups
-use the fixed literal `dataset`, not manifest country, paths, hashes or policy IDs.
-This adds at most three dataset series per instance. Explicit additional dates
-within coverage keep their precedence and bypass lookup counters. Coverage errors
-produce the bounded `error` result.
+The holiday metric uses only `{result}` with three bounded values; the former
+`country` label has been removed. No manifest country, paths, hashes or policy IDs
+are labels. Explicit additional dates within coverage keep their precedence and
+bypass lookup counters. Coverage errors produce the bounded `error` result.

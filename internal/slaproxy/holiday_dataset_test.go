@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -67,7 +66,7 @@ func datasetConfig(t testing.TB, path string) Config {
 }
 func datasetEngine(t *testing.T, cfg Config) *CalendarEngine {
 	t.Helper()
-	engine, err := newCalendarEngineAt(cfg, CountryHolidays{}, instant(t, "2026-11-17T12:00:00Z"))
+	engine, err := newCalendarEngineAt(cfg, instant(t, "2026-11-17T12:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,8 +82,6 @@ func TestDatasetConfiguration(t *testing.T) {
 		{"dataset", Holidays{Dataset: datasetPath("/etc/cal.ics")}, true},
 		{"union", Holidays{Dataset: datasetPath("/etc/cal.ics"), AdditionalDates: []string{"2027-12-24"}}, true},
 		{"additional", Holidays{AdditionalDates: []string{"2027-12-24"}}, true},
-		{"country", Holidays{Dataset: datasetPath("/etc/cal.ics"), Country: "SE"}, false},
-		{"subdivision", Holidays{Dataset: datasetPath("/etc/cal.ics"), Subdivision: "BY"}, false},
 		{"empty", Holidays{Dataset: datasetPath("")}, false},
 		{"relative", Holidays{Dataset: datasetPath("cal.ics")}, false},
 		{"URL", Holidays{Dataset: datasetPath("https://example.test/cal.ics")}, false},
@@ -99,11 +96,11 @@ func TestDatasetConfiguration(t *testing.T) {
 			}
 		})
 	}
-	text := strings.Replace(exampleConfig, "country: SE", `dataset: ""`, 1)
+	text := strings.Replace(exampleConfig, `additional_dates: ["2027-12-24"]`, `dataset: ""`, 1)
 	if _, err := LoadConfig(strings.NewReader(text)); err == nil {
 		t.Fatal("explicit empty path accepted")
 	}
-	text = strings.Replace(exampleConfig, "country: SE", `dataset: "/etc/cal.ics"`+"\n          typo: true", 1)
+	text = strings.Replace(exampleConfig, `additional_dates: ["2027-12-24"]`, `dataset: "/etc/cal.ics"`+"\n          typo: true", 1)
 	if _, err := LoadConfig(strings.NewReader(text)); err == nil {
 		t.Fatal("unknown field accepted")
 	}
@@ -305,11 +302,11 @@ func TestGeneratedHolidayDatasetsAndCivilDates(t *testing.T) {
 func TestDatasetCoverageAndReadiness(t *testing.T) {
 	path := writeDataset(t, icsCalendar(icsEvent("20260101", "")), 2026, 2026)
 	cfg := datasetConfig(t, path)
-	if _, err := newCalendarEngineAt(cfg, CountryHolidays{}, instant(t, "2026-11-17T00:00:00Z")); err == nil {
+	if _, err := newCalendarEngineAt(cfg, instant(t, "2026-11-17T00:00:00Z")); err == nil {
 		t.Fatal("insufficient startup horizon accepted")
 	}
 	cfg.EvaluationHorizonDays = 10
-	engine, err := newCalendarEngineAt(cfg, CountryHolidays{}, instant(t, "2026-11-17T00:00:00Z"))
+	engine, err := newCalendarEngineAt(cfg, instant(t, "2026-11-17T00:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +320,7 @@ func TestDatasetCoverageAndReadiness(t *testing.T) {
 	p := cfg.SLADefinitions[0].SLAs["business"]
 	p.Schedule = map[string][]string{"monday": {}}
 	cfg.SLADefinitions[0].SLAs["business"] = p
-	engine, err = newCalendarEngineAt(cfg, CountryHolidays{}, instant(t, "2026-11-17T00:00:00Z"))
+	engine, err = newCalendarEngineAt(cfg, instant(t, "2026-11-17T00:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,13 +398,14 @@ func TestDatasetSemanticVersionsCacheAndIsolation(t *testing.T) {
 	}
 }
 
-func TestDatasetMetricsBoundedAndLegacyVersion(t *testing.T) {
+func TestDatasetMetricsBounded(t *testing.T) {
 	cfg := datasetConfig(t, fixtureDataset(t, "holidays_se.ics"))
 	m := newMetrics(cfg)
-	engine, err := newCalendarEngineAt(cfg, observedHolidays{provider: CountryHolidays{}, metrics: m}, instant(t, "2026-11-17T00:00:00Z"))
+	engine, err := newCalendarEngineAt(cfg, instant(t, "2026-11-17T00:00:00Z"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	engine.metrics = m
 	for _, at := range []string{"2026-01-01T12:00:00Z", "2026-11-11T12:00:00Z", "2041-01-01T12:00:00Z"} {
 		_, _ = engine.Evaluate(context.Background(), PolicyInput{}, PolicyRef{"sla_id", "business"}, "", instant(t, at))
 	}
@@ -417,7 +415,7 @@ func TestDatasetMetricsBoundedAndLegacyVersion(t *testing.T) {
 		if family.GetName() == "sla_proxy_holiday_evaluations_total" {
 			for _, metric := range family.Metric {
 				for _, label := range metric.Label {
-					if label.GetName() == "country" && label.GetValue() != "dataset" {
+					if label.GetName() != "result" {
 						t.Fatal("unbounded dataset label", label)
 					}
 					if label.GetName() == "result" {
@@ -429,43 +427,6 @@ func TestDatasetMetricsBoundedAndLegacyVersion(t *testing.T) {
 	}
 	if len(results) != 3 {
 		t.Fatal(results)
-	}
-	// Freeze the original legacy serialization contract, including field order.
-	legacy := testConfig(t)
-	compiled, err := NewCalendarEngine(legacy, CountryHolidays{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for ref, p := range compiled.policies {
-		policy := legacy.SLADefinitions[0].SLAs[ref.SLAValue]
-		for _, def := range legacy.SLADefinitions {
-			if def.SLALabel == ref.SLALabel {
-				policy = def.SLAs[ref.SLAValue]
-			}
-		}
-		type legacyHolidays struct {
-			Country, Subdivision string
-			AdditionalDates      []string
-		}
-		type legacyPolicy struct {
-			Timezone string
-			Schedule map[string][]string
-			Holidays *legacyHolidays
-		}
-		original := legacyPolicy{Timezone: policy.Timezone, Schedule: policy.Schedule}
-		if h := policy.Holidays; h != nil {
-			original.Holidays = &legacyHolidays{h.Country, h.Subdivision, h.AdditionalDates}
-		}
-		data, _ := json.Marshal(struct {
-			Ref             PolicyRef
-			Policy          legacyPolicy
-			HorizonDays     int
-			Provider, Rules string
-		}{ref, original, legacy.EvaluationHorizonDays, CountryHolidays{}.Version(), "wall-clock-v1"})
-		sum := sha256.Sum256(data)
-		if p.version != fmt.Sprintf("%x", sum) {
-			t.Fatal("legacy policy version changed")
-		}
 	}
 }
 

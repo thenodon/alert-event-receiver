@@ -46,10 +46,8 @@ durable mode is enabled.
 | `slas.<name>.timezone` | string | none | Explicit IANA zone, including `UTC`; `Local` rejected; zone data embedded | Required |
 | `slas.<name>.schedule` | weekday → window list | none | Nonempty map; lowercase full English weekdays; windows described below | Required |
 | `slas.<name>.holidays` | map | absent | Exclude local dates; omitted means no holiday exclusions | Common |
-| `holidays.dataset` | absolute `.ics` path | absent | Local dataset plus adjacent `.ics.json`; mutually exclusive with country/subdivision; see [dataset workflow](holiday-datasets.md) | Common |
-| `holidays.country` | string | absent | Compatibility-only `SE` or `DE`, with supported subdivision only | Legacy |
-| `holidays.subdivision` | string | absent | Compatibility-only `BY` with `DE`; requires country | Legacy |
-| `holidays.additional_dates` | string list | absent | Exact valid `YYYY-MM-DD` local dates; allowed without country | Common |
+| `holidays.dataset` | absolute `.ics` path | absent | Local dataset plus adjacent `.ics.json`; see [dataset workflow](holiday-datasets.md) | Common |
+| `holidays.additional_dates` | string list | absent | Exact valid `YYYY-MM-DD` local dates; allowed without a dataset | Common |
 
 Policy field paths in the last rows are relative to
 `sla_definitions[].slas.<name>`. Definitions are independent namespaces even when
@@ -64,28 +62,17 @@ across weekdays, including Sunday/Monday and Saturday/Sunday boundaries;
 adjacent windows are allowed. An empty weekday list represents no configured
 windows, though an overnight window from the previous weekday may still apply.
 
-An optional holidays block requires a dataset, legacy country or explicit dates.
-Dataset mode supports any operator-supplied region without country imports and
-requires explicit coverage and SHA-bound metadata. The table below describes
-legacy compatibility mode only; do not combine it with dataset. Legacy subdivision
-requires country. Country syntax is two uppercase ASCII letters. Explicit dates
-must be valid, exact `YYYY-MM-DD` values. Coverage is checked before listening:
+An optional holidays block requires a dataset, explicit dates, or both.
+Datasets support any operator-supplied region without country imports and require
+explicit coverage and SHA-bound metadata. Explicit dates must be valid, exact
+`YYYY-MM-DD` values. See the [dataset workflow](holiday-datasets.md) for public
+holidays, subdivisions, company closures and offline generation.
 
-| Country | Subdivision | Coverage |
-|---|---|---|
-| `SE` | omitted | Swedish public holidays |
-| `DE` | omitted | Holidays common nationally in Germany |
-| `DE` | `BY` | Bavaria's statewide public holidays |
-
-Other combinations fail startup. The offline adapter uses `rickar/cal/v2`
-v2.1.32; no remote calendar service is contacted. Only public holidays are used.
-Swedish Christmas Eve, New Year's Eve and Midsummer's Eve are not included as
-public holidays; add explicit dates for company closures. Bavarian municipality-
-specific holidays, including Augsburg's Peace Festival and local Assumption Day
-observance, also need explicit dates. A country-less list of explicit dates is
-supported. Provider upgrades require reviewed dependency updates and regression
-tests. Legacy region expansion requires code; use [datasets](holiday-datasets.md)
-for new countries/subdivisions without Go changes.
+The former `country` and `subdivision` YAML fields have been removed and are
+rejected as unknown fields. Generate/install the appropriate dataset and replace
+those fields with `dataset`; do not remove holiday exclusions unintentionally.
+Country/subdivision values in manifests and offline generator arguments remain
+informational provenance and data selection respectively.
 
 ## Durable state and Valkey
 

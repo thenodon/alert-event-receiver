@@ -43,11 +43,8 @@ type Policy struct {
 }
 
 type Holidays struct {
-	Country         string   `yaml:"country,omitempty"`
-	Subdivision     string   `yaml:"subdivision,omitempty"`
 	AdditionalDates []string `yaml:"additional_dates,omitempty"`
 	// Pointer distinguishes an omitted dataset from an explicitly empty path.
-	// Omission in JSON preserves existing legacy policy-version serialization.
 	Dataset *string `yaml:"dataset,omitempty" json:",omitempty"`
 }
 
@@ -154,14 +151,8 @@ func validatePolicy(p Policy) error {
 			if *h.Dataset == "" || !filepath.IsAbs(*h.Dataset) || filepath.Ext(*h.Dataset) != ".ics" || strings.TrimSpace(*h.Dataset) != *h.Dataset {
 				return fmt.Errorf("holidays.dataset must be an absolute local .ics path")
 			}
-			if h.Country != "" || h.Subdivision != "" {
-				return fmt.Errorf("holidays.dataset cannot be combined with country or subdivision")
-			}
-		} else if h.Country == "" && (h.Subdivision != "" || len(h.AdditionalDates) == 0) {
-			return fmt.Errorf("holidays requires dataset, country or additional_dates; subdivision requires country")
-		}
-		if h.Country != "" && (len(h.Country) != 2 || h.Country[0] < 'A' || h.Country[0] > 'Z' || h.Country[1] < 'A' || h.Country[1] > 'Z') {
-			return fmt.Errorf("holiday country must have two uppercase ASCII letters")
+		} else if len(h.AdditionalDates) == 0 {
+			return fmt.Errorf("holidays requires dataset or additional_dates")
 		}
 		for _, date := range h.AdditionalDates {
 			parsed, err := time.Parse("2006-01-02", date)

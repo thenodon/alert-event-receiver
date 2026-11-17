@@ -43,17 +43,6 @@ type PolicyInput struct {
 	Enrichment Enrichment
 }
 
-// HolidayProvider is the legacy compatibility adapter. Per-policy immutable ICS
-// datasets are compiled by CalendarEngine without changing this interface.
-// It receives a civil date: only Year/Month/Day are meaningful.
-// It must not reinterpret that date by converting its time zone. Implementations
-// validate coverage at startup and must support concurrent evaluation.
-type HolidayProvider interface {
-	Version() string
-	Validate(country, subdivision string) error
-	IsHoliday(ctx context.Context, localDate time.Time, country, subdivision string) (bool, error)
-}
-
 // PendingOccurrence is a read model, not a durable delivery state machine.
 type PendingOccurrence struct {
 	Alert            models.Alert

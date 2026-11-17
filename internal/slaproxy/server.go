@@ -67,10 +67,11 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 			sinks[destination.ID] = sink
 		}
 	}
-	engine, err := NewCalendarEngine(cfg, observedHolidays{provider: CountryHolidays{}, metrics: s.metrics})
+	engine, err := NewCalendarEngine(cfg)
 	if err != nil {
 		return nil, err
 	}
+	engine.metrics = s.metrics
 	s.evaluator, s.now = engine, time.Now
 	if cfg.Durable.Enabled {
 		password := ""

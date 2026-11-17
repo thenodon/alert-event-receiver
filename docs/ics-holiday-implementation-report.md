@@ -34,6 +34,13 @@ Implemented on `feature/ics-holiday-datasets`, based on the maintainer's
 
 ## Compatibility and operational decisions
 
+Subsequent maintainer-approved cleanup removes the former country/subdivision YAML
+fields, country adapter, provider interface and `rickar/cal` dependency. Public
+holidays now require ICS; explicit dates still work alone. The metric now has only
+a `result` label. Policy serialization is simplified and existing policy hashes
+change; a reused durable namespace requires its usual higher-epoch procedure.
+The legacy compatibility statements below describe the initial implementation.
+
 Legacy country/subdivision configuration, provider callers and legacy policy hashes
 remain compatible. ICS mode adds countries through files/YAML without compiled
 country imports. The running binary requires neither Python nor network access.

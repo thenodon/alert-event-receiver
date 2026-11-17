@@ -120,12 +120,13 @@ property validation and civil-day expansion implement the documented restricted
 profile; the library still handles RFC content lines/folding/property syntax.
 See [accepted profile](sla-proxy/holiday-datasets.md#manifest-and-accepted-ics-profile).
 
-The legacy `HolidayProvider` interface and country adapter remain compatible.
+The former country adapter, `HolidayProvider` interface and `rickar/cal` dependency
+have been removed. Public holidays use ICS datasets only.
 Dataset snapshots belong to compiled policies and are reused by canonical path.
-Semantic hashes contain sorted dates, coverage and a rule version. Legacy policy
-serialization remains byte-compatible; unrelated policies do not acquire a new
-version when another file changes. The durable store schema and action/occurrence/
-sink identities are unchanged. Dataset changes use existing epoch fences and
+Semantic hashes contain sorted dates, coverage and a rule version. Policy hashes
+use normalized configuration and dataset semantics; unrelated policies do not
+acquire a new version when another file changes. The durable store schema and
+action/occurrence/sink identities are unchanged. Dataset changes use existing epoch fences and
 policy holds, not a new snapshot store or automatic migration.
 
 `tools/holidays/requirements.txt` pins the optional offline exporter environment.
