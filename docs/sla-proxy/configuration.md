@@ -46,8 +46,9 @@ durable mode is enabled.
 | `slas.<name>.timezone` | string | none | Explicit IANA zone, including `UTC`; `Local` rejected; zone data embedded | Required |
 | `slas.<name>.schedule` | weekday → window list | none | Nonempty map; lowercase full English weekdays; windows described below | Required |
 | `slas.<name>.holidays` | map | absent | Exclude local dates; omitted means no holiday exclusions | Common |
-| `holidays.country` | string | absent | `SE` or `DE`, with supported subdivision only | Common |
-| `holidays.subdivision` | string | absent | `BY` only with `DE`; requires country | Common |
+| `holidays.dataset` | absolute `.ics` path | absent | Local dataset plus adjacent `.ics.json`; mutually exclusive with country/subdivision; see [dataset workflow](holiday-datasets.md) | Common |
+| `holidays.country` | string | absent | Compatibility-only `SE` or `DE`, with supported subdivision only | Legacy |
+| `holidays.subdivision` | string | absent | Compatibility-only `BY` with `DE`; requires country | Legacy |
 | `holidays.additional_dates` | string list | absent | Exact valid `YYYY-MM-DD` local dates; allowed without country | Common |
 
 Policy field paths in the last rows are relative to
@@ -63,7 +64,10 @@ across weekdays, including Sunday/Monday and Saturday/Sunday boundaries;
 adjacent windows are allowed. An empty weekday list represents no configured
 windows, though an overnight window from the previous weekday may still apply.
 
-An optional holidays block requires country or explicit dates; subdivision
+An optional holidays block requires a dataset, legacy country or explicit dates.
+Dataset mode supports any operator-supplied region without country imports and
+requires explicit coverage and SHA-bound metadata. The table below describes
+legacy compatibility mode only; do not combine it with dataset. Legacy subdivision
 requires country. Country syntax is two uppercase ASCII letters. Explicit dates
 must be valid, exact `YYYY-MM-DD` values. Coverage is checked before listening:
 
@@ -80,7 +84,8 @@ public holidays; add explicit dates for company closures. Bavarian municipality-
 specific holidays, including Augsburg's Peace Festival and local Assumption Day
 observance, also need explicit dates. A country-less list of explicit dates is
 supported. Provider upgrades require reviewed dependency updates and regression
-tests; expanding coverage requires explicit adapter support.
+tests. Legacy region expansion requires code; use [datasets](holiday-datasets.md)
+for new countries/subdivisions without Go changes.
 
 ## Durable state and Valkey
 

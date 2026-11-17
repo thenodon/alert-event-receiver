@@ -9,7 +9,7 @@
 | POST | configured webhook path | Validate a notification batch; observe or persist according to mode |
 | GET | `/metrics` | Independent Prometheus registry |
 | GET | `/healthz` | HTTP liveness |
-| GET | `/readyz` | Observation capability, or active policy/store readiness in durable modes; HTTP 503 while stopping/unavailable |
+| GET | `/readyz` | Observation capability and rolling dataset coverage, or additionally active policy/store readiness in durable modes; HTTP 503 while stopping/unavailable |
 
 Webhook input uses the shared Alertmanager v4 wire model. Strict JSON decoding
 rejects unknown fields, duplicate keys, null payloads, malformed timestamps and
@@ -197,7 +197,7 @@ and any environment proxy settings are trusted operator configuration.
 | `sla_proxy_calendar_classifications_total` | `sla_label`, `sla_value`, `classification`, `reason` | Successful per-notification calendar classification at startsAt; inside_sla/outside_sla |
 | `sla_proxy_alert_eligibility_observations_total` | `sla_label`, `sla_value`, `alert_status`, `eligibility_status`, `reason` | Per-notification lifecycle status, including pending, unknown and error |
 | `sla_proxy_policy_errors_total` | `reason` | Failed evaluator calls; one call per unique policy pair plus exact startsAt in each batch |
-| `sla_proxy_holiday_evaluations_total` | `country`, `result` | Country calendar checks, including future search dates; result = holiday/not_holiday/error |
+| `sla_proxy_holiday_evaluations_total` | `country`, `result` | Legacy country or dataset checks, including future search dates; dataset uses fixed country="dataset"; result = holiday/not_holiday/error |
 
 Calendar success metrics count notifications (including within-request cache
 reuse); error metrics count actual evaluator calls. In durable modes,
@@ -212,7 +212,7 @@ metrics. Durable and delivery metrics are described separately below. All
 counters reset on restart.
 
 Holiday-check counters measure date checks, not alerts or decisions; explicit
-dates and omitted country calendars do not invoke the country provider. Error
+dates within valid coverage and omitted calendars do not invoke the holiday provider. Error
 reason labels are bounded: calendar_error, unknown_policy,
 invalid_evaluation_time, cancelled and evaluation_error. Observation metrics
 have no sink label. Every configured destination uses the occurrence's selected
@@ -313,3 +313,17 @@ Enrichment, destination routing rules, sink editing/redrive APIs and downstream
 processing guarantees are not implemented. See [Redis/Valkey
 debugging](../redis-debugging.md#alert-sla-proxy-keys-and-debugging) for
 operational inspection, configuration changes and recovery.
+
+## ICS holiday datasets
+
+The [dataset contract](holiday-datasets.md#manifest-and-accepted-ics-profile) defines
+accepted ICS properties, resource limits, manifest fields and coverage. Invalid
+files fail startup. Missing date coverage propagates as `calendar_error`, never
+`not_holiday`. Observe-only evaluation failures return 500; failed new durable
+acceptance returns 503. Existing pinned lifecycle facts are retained.
+
+The existing holiday metric keeps its `{country,result}` shape. Dataset lookups
+use the fixed literal `dataset`, not manifest country, paths, hashes or policy IDs.
+This adds at most three dataset series per instance. Explicit additional dates
+within coverage keep their precedence and bypass lookup counters. Coverage errors
+produce the bounded `error` result.

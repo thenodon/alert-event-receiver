@@ -82,7 +82,7 @@ merge. Enrichment remains a no-op.
 Holiday exclusions cover the entire local date being tested, including overnight
 carry. For Monday 22:00–Tuesday 06:00, a Tuesday holiday excludes Tuesday's
 carry; a Monday holiday alone does not exclude Tuesday. Explicit dates take
-precedence over country checks. With no holidays block, only the weekly schedule
+precedence over dataset or legacy country checks within valid coverage. With no holidays block, only the weekly schedule
 applies.
 
 IANA offset intervals preserve the existing DST behavior: nonexistent spring
@@ -171,3 +171,16 @@ Durable work, claims and retry deadlines recover after restart subject to Valkey
 persistence. Unresolved records do not expire automatically; outstanding/held work
 can retain payloads beyond normal resolved retention. See [operations](operations.md)
 for practical recovery and [configuration](configuration.md) for supported settings.
+
+## File-backed holiday data
+
+Each policy can select one immutable [ICS dataset](holiday-datasets.md). Its dates
+are local civil-day exclusions and its manifest explicitly asserts covered years.
+Missing coverage is an error, not a workday. The runtime has no Python, network
+provider or reload dependency. Legacy country/subdivision settings remain available.
+
+Policy versions include the dataset's sorted date-set/coverage hash. Changed data
+or coverage requires a higher durable epoch and holds affected historical bindings;
+scheduler recovery retains their original decisions rather than applying new dates.
+Even a coverage extension is a policy change. This iteration uses safe holds, not
+automatic migration or persistent dataset snapshots; see [update guidance](holiday-datasets.md#install-and-update-safely).

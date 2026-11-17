@@ -7,6 +7,7 @@ network access and HTTPS for production; demo namespaces are not migrations.
 | File | Purpose | Prerequisites |
 |---|---|---|
 | [event-receiver.env](event-receiver.env) | Minimal Bash environment for the receiver | Local Valkey and VictoriaLogs |
+| [alert-sla-proxy-ics.yaml](alert-sla-proxy-ics.yaml) | File-backed holidays, independent of compiled countries | Install the checked-in ICS/manifest pair or generate another dataset offline |
 | [alert-sla-proxy-observe.yaml](alert-sla-proxy-observe.yaml) | Minimal stateless policy observation | None |
 | [alert-sla-proxy-durable.yaml](alert-sla-proxy-durable.yaml) | Minimal durable state without delivery | Valkey at 127.0.0.1:6380 |
 | [alert-sla-proxy-delivery-log.yaml](alert-sla-proxy-delivery-log.yaml) | Minimal log delivery | Same Valkey, independent namespace |
@@ -34,3 +35,6 @@ Minimal policies are always-open UTC so examples work on any weekday. The comple
 example demonstrates business hours, optional holidays and independent label
 namespaces. Its policy names differ from the minimal `demo` policy: adjust test
 labels accordingly, rather than treating a successful skip response as delivery.
+
+[Offline ICS workflow](../sla-proxy/holiday-datasets.md) ·
+[Real ICS/manifest fixtures](../../internal/slaproxy/testdata/holidays/README.md)

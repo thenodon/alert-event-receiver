@@ -1,0 +1,16 @@
+# Install the checked-in example pair or generate data offline; see holiday-datasets.md.
+# Observe-only by default. This absolute path is an installation placeholder.
+sla_definitions:
+  - sla_label: sla_id
+    slas:
+      business-hours-se:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["08:00-17:00"]
+          tuesday: ["08:00-17:00"]
+          wednesday: ["08:00-17:00"]
+          thursday: ["08:00-17:00"]
+          friday: ["08:00-17:00"]
+        holidays:
+          dataset: /etc/alert-sla-proxy/example-holidays/holidays_se.ics
+          additional_dates: ["2027-12-24"]

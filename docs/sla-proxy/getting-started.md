@@ -148,12 +148,35 @@ Production HTTP destinations should use HTTPS and credentials from a secret
 mechanism. Replace the loopback URL explicitly; the generic Alertmanager payload
 requires no ServiceNow-specific translation in this service.
 
+## Add public holidays without country-specific code
+
+Use [the ICS example](../examples/alert-sla-proxy-ics.yaml) after installing a pair:
+
+```bash
+install -d /etc/alert-sla-proxy/example-holidays
+install -m 0644 internal/slaproxy/testdata/holidays/holidays_se.ics \
+  /etc/alert-sla-proxy/example-holidays/holidays_se.ics
+install -m 0644 internal/slaproxy/testdata/holidays/holidays_se.ics.json \
+  /etc/alert-sla-proxy/example-holidays/holidays_se.ics.json
+/tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-ics.yaml
+```
+
+Run installation with suitable privileges and stop the earlier proxy first. This
+is a first install into an unused example directory; updates must switch a complete
+version directory atomically. The policy name is `business-hours-se`, so change
+the demo webhooks' `sla_id` accordingly. Holidays/business hours can make an
+otherwise valid input pending or ineligible. The checked-in pair covers 2020–2040;
+startup checks today's local date and the search horizon, not just test timestamps.
+Generate another country/subdivision using the [offline workflow](holiday-datasets.md).
+Python is used only during offline preparation, never by the Go service.
+
 ## Common startup and verification problems
 
 | Symptom | Action |
 |---|---|
 | Config file not found | Pass `-config` explicitly; the default is `alert-sla-proxy.yaml` in the current directory |
 | Strict YAML error | Use current keys; unknown/duplicate fields and extra YAML documents are rejected |
+| ICS read/SHA/coverage failure | Install a valid complete pair with sufficient years; see [dataset diagnostics](holiday-datasets.md#troubleshoot) |
 | Missing HTTP credentials | Set referenced variables when delivery is enabled; disabled delivery does not resolve them |
 | Valkey unavailable | Check port 6380 and `PING`; durable startup requires connectivity |
 | Epoch/catalog or destination conflict | Use the matching original configuration; follow [safe configuration changes](operations.md#change-policies-and-destinations) |
