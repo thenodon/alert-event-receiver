@@ -119,6 +119,10 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
 			return
 		}
+		if err := engine.coverageAt(s.now()); err != nil {
+			http.Error(w, "holiday dataset coverage is insufficient; install refreshed data and restart", http.StatusServiceUnavailable)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if s.durable != nil {
 			ctx, cancel := context.WithTimeout(r.Context(), cfg.Durable.Scheduler.OperationTimeout)

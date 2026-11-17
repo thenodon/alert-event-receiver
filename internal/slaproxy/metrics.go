@@ -57,7 +57,7 @@ func newMetrics(cfg Config) *metrics {
 			Name: "sla_proxy_policy_errors_total", Help: "Failed evaluator calls by bounded reason; one call per selected policy pair and exact startsAt instant per webhook.",
 		}, []string{"reason"}),
 		holidays: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "sla_proxy_holiday_evaluations_total", Help: "Country calendar checks, including future dates searched, by configured country and result; not alert counts.",
+			Name: "sla_proxy_holiday_evaluations_total", Help: "Legacy country or ICS dataset checks, including future dates searched; dataset uses the fixed country label dataset. Not alert counts.",
 		}, []string{"country", "result"}),
 		storeOperations:       prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_state_store_operations_total", Help: "State-store API calls by operation and outcome, including bounded optimistic retries within a call."}, []string{"operation", "result"}),
 		storeErrors:           prometheus.NewCounterVec(prometheus.CounterOpts{Name: "sla_proxy_state_store_errors_total", Help: "Failed state-store operations; commits may be ambiguous on connection loss."}, []string{"operation"}),

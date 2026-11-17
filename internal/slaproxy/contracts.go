@@ -43,7 +43,9 @@ type PolicyInput struct {
 	Enrichment Enrichment
 }
 
-// HolidayProvider receives a civil date: only Year/Month/Day are meaningful.
+// HolidayProvider is the legacy compatibility adapter. Per-policy immutable ICS
+// datasets are compiled by CalendarEngine without changing this interface.
+// It receives a civil date: only Year/Month/Day are meaningful.
 // It must not reinterpret that date by converting its time zone. Implementations
 // validate coverage at startup and must support concurrent evaluation.
 type HolidayProvider interface {

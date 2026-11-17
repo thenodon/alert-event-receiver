@@ -89,3 +89,16 @@ func (p observedHolidays) IsHoliday(ctx context.Context, date time.Time, country
 	p.metrics.holidays.WithLabelValues(country, result).Inc()
 	return holiday, err
 }
+
+// Preserve the existing metric shape; the fixed dataset label never exposes a
+// path, hash, user-defined country, or policy name.
+func (p observedHolidays) observeDataset(holiday bool, err error) {
+	result := "not_holiday"
+	if holiday {
+		result = "holiday"
+	}
+	if err != nil {
+		result = "error"
+	}
+	p.metrics.holidays.WithLabelValues("dataset", result).Inc()
+}
