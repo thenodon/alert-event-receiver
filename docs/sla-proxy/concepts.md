@@ -40,7 +40,7 @@ Missing labels are skipped as `missing_sla_label`. An unknown value is skipped a
 
 An alert does not need to start during an SLA window to become eligible. An alert that starts outside SLA can become eligible if it is still active when the next SLA window opens.
 
-The calendar engine determines whether `startsAt` falls inside an SLA window and finds the first eligible instant at or after `startsAt. For a resolved alert, eligibility is confirmed when that instant occurs strictly before `endsAt`. For firing alerts, the durable scheduler considers the alert active until a resolution has been recorded.
+The calendar engine determines whether `startsAt` falls inside an SLA window and finds the first eligible instant at or after `startsAt`. For a resolved alert, eligibility is confirmed when that instant occurs strictly before `endsAt`. For firing alerts, the durable scheduler considers the alert active until a resolution has been recorded.
 
 For a resolved alert, the active period begins at `startsAt` and ends at `endsAt`. The alert is no longer considered active at the exact moment `endsAt` occurs.
 
