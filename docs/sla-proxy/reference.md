@@ -21,7 +21,7 @@ explicit empty alerts array is accepted. Group metadata, original labels,
 annotations and exact alert timestamps are preserved; fingerprints are never
 recomputed. The entire batch is validated before incrementing alert counters.
 
-Selection follows the [policy selection rules](concepts.md#policy-selection).
+Selection follows the [policy selection rules](concepts.md#selecting-a-policy).
 Durable modes also accept known resolutions after policy removal.
 
 ### Observe-only responses

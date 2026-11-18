@@ -75,7 +75,7 @@ independent of outbound OTLP, Valkey and HTTP sink security.
 Policy field paths in the last rows are relative to
 `sla_definitions[].slas.<name>`. Definitions are independent namespaces even when
 policy names match. The first nonempty matching label selects its definition;
-unknown values are skipped without fallback. See [selection](concepts.md#policy-selection).
+unknown values are skipped without fallback. See [selection](concepts.md#selecting-a-policy).
 
 Weekday keys are lowercase full English names. Windows use exact `HH:MM-HH:MM`
 syntax; `24:00` is allowed only as an end. Equal start/end is invalid; use
