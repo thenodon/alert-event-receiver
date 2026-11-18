@@ -40,9 +40,9 @@ Missing labels are skipped as `missing_sla_label`. An unknown value is skipped a
 
 An alert does not need to start during an SLA window to become eligible. An alert that starts outside SLA can become eligible if it is still active when the next SLA window opens.
 
-The calendar engine determines whether startsAt falls inside an SLA window and finds the first eligible instant at or after startsAt. For a resolved alert, eligibility is confirmed when that instant occurs strictly before endsAt. For firing alerts, the durable scheduler considers the alert active until a resolution has been recorded.
+The calendar engine determines whether `startsAt` falls inside an SLA window and finds the first eligible instant at or after `startsAt. For a resolved alert, eligibility is confirmed when that instant occurs strictly before `endsAt`. For firing alerts, the durable scheduler considers the alert active until a resolution has been recorded.
 
-For a resolved alert, the active period begins at startsAt and ends at endsAt. The alert is no longer considered active at the exact moment endsAt occurs.
+For a resolved alert, the active period begins at `startsAt` and ends at `endsAt`. The alert is no longer considered active at the exact moment `endsAt` occurs.
 
 ### Alert lifecycle versus proxy processing
 
@@ -121,8 +121,7 @@ When a resolution notification arrives, the proxy records that the occurrence ha
 
 - If the alert resolved before becoming eligible, and firing delivery was not yet authorized, the pending firing delivery is cancelled.
 - If firing delivery was already authorized, an external delivery attempt may already be in progress.
-- If a destination has a recorded successful firing delivery, the resolution can be sent to that destination even when the SLA window is closed.
-- A resolution is sent to a destination only after the proxy has recorded a successful firing delivery receipt for that destination.
+- A resolution can be delivered to a destination only after the proxy has recorded a successful firing receipt for that destination, even if the SLA window has since closed.
 
 **Important:** The proxy makes these decisions based on the notifications it has received, not by continuously checking whether the alert is still firing in Alertmanager. A delayed or lost resolution notification can therefore affect delivery decisions.
 
