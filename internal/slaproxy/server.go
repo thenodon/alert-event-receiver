@@ -67,10 +67,11 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 			sinks[destination.ID] = sink
 		}
 	}
-	engine, err := NewCalendarEngine(cfg, observedHolidays{provider: CountryHolidays{}, metrics: s.metrics})
+	engine, err := NewCalendarEngine(cfg)
 	if err != nil {
 		return nil, err
 	}
+	engine.metrics = s.metrics
 	s.evaluator, s.now = engine, time.Now
 	if cfg.Durable.Enabled {
 		password := ""
@@ -117,6 +118,10 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if !s.ready.Load() {
 			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		if err := engine.coverageAt(s.now()); err != nil {
+			http.Error(w, "holiday dataset coverage is insufficient; install refreshed data and restart", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

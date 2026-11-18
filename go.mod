@@ -4,10 +4,10 @@ go 1.26.11
 
 require (
 	github.com/alicebob/miniredis/v2 v2.33.0
+	github.com/arran4/golang-ical v0.3.8
 	github.com/go-logr/logr v1.4.4
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
-	github.com/rickar/cal/v2 v2.1.32
 	github.com/redis/go-redis/v9 v9.23.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc v0.23.0

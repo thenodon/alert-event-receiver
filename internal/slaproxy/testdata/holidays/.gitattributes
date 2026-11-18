@@ -1,0 +1,2 @@
+# Manifests hash exact bytes, including RFC iCalendar CRLF line endings.
+*.ics -text whitespace=cr-at-eol

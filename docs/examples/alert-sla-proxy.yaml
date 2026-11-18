@@ -22,7 +22,9 @@ sla_definitions:
           thursday: ["08:00-17:00"]
           friday: ["08:00-17:00"]
         holidays:
-          country: SE
+          # Explicit dates work alone. For public holidays, install an ICS/manifest
+          # pair and uncomment dataset (see docs/sla-proxy/holiday-datasets.md).
+          # dataset: /etc/alert-sla-proxy/holiday-data/current/holidays_se.ics
           additional_dates: ["2027-12-24"]
   - sla_label: sla_name
     slas:

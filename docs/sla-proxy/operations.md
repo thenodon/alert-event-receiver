@@ -7,7 +7,7 @@
 | Evidence | What it proves | What it does not prove |
 |---|---|---|
 | `/healthz` HTTP 200 | Listener is alive | Store or destination readiness |
-| `/readyz` HTTP 200 | Observation capability, or active store/catalog health in durable modes | Queue fully scanned, destinations available, or backlog drained |
+| `/readyz` HTTP 200 | Observation capability and rolling ICS coverage, plus active store/catalog health in durable modes | Queue fully scanned, destinations available, or backlog drained |
 | Observe-only webhook HTTP 200 | Valid observation completed (skips possible) | Persistence or forwarding |
 | Durable webhook HTTP 200, `persisted: true` | All selected inputs committed to Valkey | Separate disk/replica receipt or sink delivery |
 | `forwarded: false` | Handler did not synchronously forward | Delivery dispatcher is disabled; check mode instead |
@@ -26,6 +26,7 @@ prior commits. `persisted` means Valkey acceptance under server persistence sett
 | Symptom | Likely cause / next action |
 |---|---|
 | Skipped alert | Check original selector labels and first nonempty matching definition; unknown values never fall through |
+| Dataset coverage readiness failure | Refresh data to cover the rolling local-date horizon and restart; existing saved decisions are retained |
 | Pending alert | SLA window has not opened; inspect next evaluation, zone, holidays and horizon |
 | Observe-only `unknown` | Notification evidence does not establish activity at a passed opportunity; this is not the durable known-state rule |
 | Eligible but no delivery | Check delivery enabled, binding hold, retry deadline and worker backlog; eligibility alone is not a receipt |
@@ -124,7 +125,7 @@ higher epoch fences old instances, so coordinate the rollout across all replicas
 The full authoritative change matrix is in
 [configuration changes and key deletion](../redis-debugging.md#configuration-changes-and-key-deletion).
 
-- **SLA policy change/removal:** higher epoch; affected pinned bindings are held,
+- **SLA policy change/removal, including effective ICS dates or coverage:** higher epoch; affected pinned bindings are held,
   not migrated. New occurrences use current selection. Known resolutions still
   commit. Restoring the exact pinned policy under a higher epoch can release holds.
 - **Add a destination:** retain every registered destination unchanged and use a
@@ -233,3 +234,18 @@ Keep [Redis/Valkey debugging](../redis-debugging.md) available for key-level
 investigation and the [fence-first repair procedure](../redis-debugging.md#fence-first-quarantine-repair).
 Implementation details are in the
 [current implementation notes](../specifications/sla-proxy-implementation.md).
+
+## Dataset refresh and expiry
+
+Use [offline holiday datasets](holiday-datasets.md) for generation, manifests,
+immutable version directories, epoch changes, backup/rollback and failure diagnosis.
+The manifest binds exact file bytes; policy identity hashes effective dates and
+coverage. Byte-only equivalent updates do not need an epoch change, but changed
+dates **or coverage bounds** do. Existing bindings are held, not migrated.
+
+`/readyz` warns when the current local date's rolling horizon no longer fits.
+Calendar evaluations reject uncovered dates even on unscheduled days or explicit
+additions. Readiness failure does not cancel already authorized sends or erase
+receipts. Known resolutions/saved decisions follow their pinned durable semantics.
+Restoring old bytes must also satisfy startup coverage; if old data has expired,
+exact restoration may be unavailable. No automatic migration/redrive is provided.

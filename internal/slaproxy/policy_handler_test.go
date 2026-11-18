@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,6 +32,13 @@ func (f evaluatorFunc) Evaluate(ctx context.Context, input PolicyInput, ref Poli
 
 func TestWebhookClassifiesOccurrenceTimeDespiteProcessingClock(t *testing.T) {
 	s := newTestService(t)
+	cfg := s.cfg
+	policy := cfg.SLADefinitions[0].SLAs["business"]
+	policy.Holidays.Dataset = datasetPath(fixtureDataset(t, "holidays_se.ics"))
+	cfg.SLADefinitions[0].SLAs["business"] = policy
+	engine := datasetEngine(t, cfg)
+	engine.metrics = s.metrics
+	s.evaluator = engine
 	at := instant(t, "2026-11-09T12:30:00+01:00")
 	s.now = func() time.Time { return instant(t, "2026-11-12T17:05:00+01:00") }
 	alerts := []models.Alert{
@@ -67,25 +73,27 @@ func TestWebhookClassifiesOccurrenceTimeDespiteProcessingClock(t *testing.T) {
 	if got := counter(t, s, "sla_proxy_calendar_classifications_total", map[string]string{"sla_label": "sla_name", "sla_value": "business", "classification": "inside_sla", "reason": ReasonEligible}); got != 1 {
 		t.Fatal(got)
 	}
-	// One provider check for this unique pair, despite two alert statuses.
-	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"country": "SE", "result": "not_holiday"}); got != 1 {
+	// One dataset check for this unique pair, despite two alert statuses.
+	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"result": "not_holiday"}); got != 1 {
 		t.Fatal(got)
 	}
 }
 
 func TestEvaluationFailureReturns500WithoutClaimingEligibility(t *testing.T) {
 	s := newTestService(t)
-	s.now = func() time.Time { return instant(t, "2026-11-09T09:00:00+01:00") }
-	e, err := NewCalendarEngine(s.cfg, observedHolidays{provider: brokenHolidays{evaluationErr: errors.New("unavailable")}, metrics: s.metrics})
-	if err != nil {
-		t.Fatal(err)
-	}
+	s.now = func() time.Time { return instant(t, "2041-11-11T09:00:00+01:00") }
+	cfg := s.cfg
+	policy := cfg.SLADefinitions[0].SLAs["business"]
+	policy.Holidays.Dataset = datasetPath(fixtureDataset(t, "holidays_se.ics"))
+	cfg.SLADefinitions[0].SLAs["business"] = policy
+	e := datasetEngine(t, cfg)
+	e.metrics = s.metrics
 	s.evaluator = e
 	w := post(s, testPayload(t,
-		alertAt(t, "firing", "sla_id", "2026-11-09T09:00:00+01:00"),
-		alertAt(t, "resolved", "sla_id", "2026-11-09T09:00:00+01:00"),
-		alertAt(t, "firing", "sla_id", "2026-11-09T09:00:00.000000001+01:00"),
-		alertAt(t, "firing", "sla_name", "2026-11-09T09:00:00+01:00")))
+		alertAt(t, "firing", "sla_id", "2041-11-11T09:00:00+01:00"),
+		alertAt(t, "resolved", "sla_id", "2041-11-11T09:00:00+01:00"),
+		alertAt(t, "firing", "sla_id", "2041-11-11T09:00:00.000000001+01:00"),
+		alertAt(t, "firing", "sla_name", "2041-11-11T09:00:00+01:00")))
 	var result Observation
 	if w.Code != http.StatusInternalServerError || json.Unmarshal(w.Body.Bytes(), &result) != nil {
 		t.Fatalf("%d %s", w.Code, w.Body)
@@ -100,7 +108,7 @@ func TestEvaluationFailureReturns500WithoutClaimingEligibility(t *testing.T) {
 	if got := counter(t, s, "sla_proxy_policy_errors_total", map[string]string{"reason": "calendar_error"}); got != 2 {
 		t.Fatal("error counted per alert instead of call", got)
 	}
-	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"country": "SE", "result": "error"}); got != 2 {
+	if got := counter(t, s, "sla_proxy_holiday_evaluations_total", map[string]string{"result": "error"}); got != 2 {
 		t.Fatal(got)
 	}
 	if got := counter(t, s, "sla_proxy_notifications_received_total", map[string]string{"status": "5xx"}); got != 1 {
@@ -203,7 +211,7 @@ func TestSamePolicyDifferentStartsAtClassifiesIndependently(t *testing.T) {
 
 func TestDeliveryLatencyAndHolidayDoNotChangeOccurrenceClassification(t *testing.T) {
 	p := businessPolicy()
-	p.Holidays = &Holidays{Country: "SE", AdditionalDates: []string{"2026-11-11"}}
+	p.Holidays = &Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics")), AdditionalDates: []string{"2026-11-11"}}
 	cfg := testConfig(t)
 	cfg.SLADefinitions[0].SLAs["business"] = p
 	s, err := New(cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))

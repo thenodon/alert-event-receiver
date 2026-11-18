@@ -72,7 +72,7 @@ def check_documents():
                     name = name[:-4]
                 if not (ROOT / name).exists():
                     errors.append(f"{path.relative_to(ROOT)}: command references missing {name}")
-    for path in (ROOT / "docs").rglob("*.py"):
+    for path in [*(ROOT / "docs").rglob("*.py"), *(ROOT / "tools/holidays").glob("*.py")]:
         try:
             ast.parse(path.read_text(), filename=str(path))
         except SyntaxError as error:
@@ -91,6 +91,7 @@ def check_examples():
 import (
     "os"
     "path/filepath"
+    "strings"
     "testing"
 )
 func TestDocumentationExamples(t *testing.T) {
@@ -103,7 +104,21 @@ func TestDocumentationExamples(t *testing.T) {
             defer f.Close()
             cfg, err := LoadConfig(f)
             if err != nil { t.Fatal(err) }
-            if _, err = NewCalendarEngine(cfg, CountryHolidays{}); err != nil { t.Fatal(err) }
+            // The documented absolute example install prefix is substituted only
+            // in this offline test. Production configs are never rewritten.
+            for _, def := range cfg.SLADefinitions {
+                for _, policy := range def.SLAs {
+                    if policy.Holidays != nil && policy.Holidays.Dataset != nil {
+                        value := *policy.Holidays.Dataset
+                        const prefix = "/etc/alert-sla-proxy/example-holidays/"
+                        if !strings.HasPrefix(value, prefix) { t.Fatal("unknown example dataset prefix", value) }
+                        actual, err := filepath.Abs(filepath.Join("testdata", "holidays", strings.TrimPrefix(value, prefix)))
+                        if err != nil { t.Fatal(err) }
+                        *policy.Holidays.Dataset = actual
+                    }
+                }
+            }
+            if _, err = NewCalendarEngine(cfg); err != nil { t.Fatal(err) }
         })
     }
 }
@@ -139,7 +154,7 @@ func TestDocumentationExamples(t *testing.T) {
         overlay.write_text(json.dumps({"Replace": replacements}))
         subprocess.run(["go", "test", "-overlay", str(overlay), "./internal/slaproxy", "./internal/alertload",
                         "-run", "^TestDocumentationExamples$", "-count=1", "-v"], cwd=ROOT, check=True)
-    print("All SLA YAML examples and equivalent alertload profiles passed actual Go loaders.")
+    print("All SLA YAML/ICS/manifest examples and equivalent alertload profiles passed actual Go loaders.")
 
 
 def main():

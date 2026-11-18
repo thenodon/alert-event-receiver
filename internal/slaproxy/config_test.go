@@ -27,7 +27,6 @@ const exampleConfig = `sla_definitions:
         schedule:
           monday: ["08:00-12:00", "13:00-17:00"]
         holidays:
-          country: SE
           additional_dates: ["2027-12-24"]
   - sla_label: sla_name
     slas:
@@ -66,7 +65,10 @@ func TestStrictYAML(t *testing.T) {
 		"unknown root":           "listen_adress: :9012\n" + exampleConfig,
 		"unknown definition":     strings.Replace(exampleConfig, "- sla_label: sla_id", "- sla_label: sla_id\n    extra: true", 1),
 		"unknown policy":         strings.Replace(exampleConfig, "timezone: UTC", "timezone: UTC\n        extra: true", 1),
-		"unknown holidays":       strings.Replace(exampleConfig, "country: SE", "country: SE\n          exclude: true", 1),
+		"removed country":        strings.Replace(exampleConfig, "holidays:", "holidays:\n          country: SE", 1),
+		"removed subdivision":    strings.Replace(exampleConfig, "holidays:", "holidays:\n          subdivision: BY", 1),
+		"country with dataset":   strings.Replace(exampleConfig, "holidays:", "holidays:\n          country: SE\n          dataset: /etc/holidays.ics", 1),
+		"unknown holidays":       strings.Replace(exampleConfig, "holidays:", "holidays:\n          exclude: true", 1),
 		"duplicate map key":      strings.Replace(exampleConfig, "timezone: UTC", "timezone: UTC\n        timezone: Europe/Berlin", 1),
 		"multiple documents":     exampleConfig + "\n---\n{}",
 		"trailing null document": exampleConfig + "\n---\nnull",
@@ -155,17 +157,13 @@ func TestPolicySyntax(t *testing.T) {
 	}
 }
 
-func TestHolidayBlockSyntaxBeforeProviderValidation(t *testing.T) {
+func TestHolidayBlockSyntax(t *testing.T) {
 	for _, tc := range []struct {
 		h     *Holidays
 		valid bool
 	}{
 		{nil, true}, {&Holidays{}, false},
-		{&Holidays{Country: "SE", Subdivision: "UNVERIFIED"}, true},
-		{&Holidays{Country: "ZZ"}, true}, // Coverage is validated by the engine at startup.
-		{&Holidays{Country: "se"}, false},
-		{&Holidays{Country: "SWE"}, false},
-		{&Holidays{Subdivision: "BY"}, false},
+		{&Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics"))}, true},
 		{&Holidays{AdditionalDates: []string{"2028-02-29", "2027-12-24"}}, true},
 		{&Holidays{AdditionalDates: []string{"2027-02-29"}}, false},
 		{&Holidays{AdditionalDates: []string{"2027-1-01"}}, false},
@@ -271,7 +269,7 @@ func TestDurableSLAOpportunities(t *testing.T) {
 		holidays                       *Holidays
 	}{
 		{"overnight", "Europe/Stockholm", "monday", "22:00-06:00", "2026-11-09T21:30:00+01:00", nil},
-		{"holiday", "Europe/Stockholm", "friday", "08:00-17:00", "2027-01-01T07:30:00+01:00", &Holidays{Country: "SE"}},
+		{"holiday", "Europe/Stockholm", "friday", "08:00-17:00", "2027-01-01T07:30:00+01:00", &Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics"))}},
 		{"spring", "Europe/Stockholm", "sunday", "02:30-03:30", "2026-03-29T00:30:00Z", nil},
 		{"autumn", "Europe/Stockholm", "sunday", "02:15-02:45", "2026-10-25T00:50:00Z", nil},
 	} {

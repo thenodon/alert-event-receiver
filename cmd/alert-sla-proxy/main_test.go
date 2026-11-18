@@ -71,20 +71,20 @@ func TestCommandCancellationShutsDown(t *testing.T) {
 	}
 }
 
-func TestUnsupportedCalendarFailsBeforeListening(t *testing.T) {
+func TestMissingDatasetFailsBeforeListening(t *testing.T) {
 	path := configFile(t, "127.0.0.1:0")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), "timezone: UTC", "timezone: UTC\n        holidays:\n          country: ZZ", 1))
+	data = []byte(strings.Replace(string(data), "timezone: UTC", "timezone: UTC\n        holidays:\n          dataset: /nonexistent/holidays.ics", 1))
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var output bytes.Buffer
-	if code := run(ctx, []string{"-config", path}, &output); code != 1 || !strings.Contains(output.String(), "unsupported holiday region") || strings.Contains(output.String(), "starting HTTP server") {
+	if code := run(ctx, []string{"-config", path}, &output); code != 1 || !strings.Contains(output.String(), "resolve ICS dataset path") || strings.Contains(output.String(), "starting HTTP server") {
 		t.Fatalf("code=%d output=%s", code, output.String())
 	}
 }

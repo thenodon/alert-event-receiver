@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 )
 
 const (
+	calendarRulesVersion   = "wall-clock-v1"
 	ReasonEligible         = "eligible"
 	ReasonOutsideWindow    = "outside_window"
 	ReasonHoliday          = "holiday"
@@ -27,10 +29,11 @@ func (e *EvaluationError) Error() string { return e.Reason + ": " + e.Err.Error(
 func (e *EvaluationError) Unwrap() error { return e.Err }
 
 type compiledPolicy struct {
-	location                      *time.Location
-	windows                       weeklyWindows
-	additionalDates               map[string]bool
-	country, subdivision, version string
+	location        *time.Location
+	windows         weeklyWindows
+	additionalDates map[string]bool
+	version         string
+	dataset         *holidayDataset
 }
 
 // CalendarEngine contains immutable compiled policies and no occurrence state.
@@ -38,18 +41,21 @@ type compiledPolicy struct {
 // alert's startsAt; the processing clock and enrichment do not affect the result.
 type CalendarEngine struct {
 	policies    map[PolicyRef]compiledPolicy
-	holidays    HolidayProvider
+	metrics     *metrics
 	horizonDays int
 }
 
-func NewCalendarEngine(cfg Config, holidays HolidayProvider) (*CalendarEngine, error) {
+func NewCalendarEngine(cfg Config) (*CalendarEngine, error) {
+	return newCalendarEngineAt(cfg, time.Now())
+}
+
+// The clock is injectable for boundary tests; dataset data itself is immutable.
+func newCalendarEngineAt(cfg Config, now time.Time) (*CalendarEngine, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	if holidays == nil {
-		return nil, fmt.Errorf("holiday provider is required")
-	}
-	engine := &CalendarEngine{policies: make(map[PolicyRef]compiledPolicy), holidays: holidays, horizonDays: cfg.EvaluationHorizonDays}
+	engine := &CalendarEngine{policies: make(map[PolicyRef]compiledPolicy), horizonDays: cfg.EvaluationHorizonDays}
+	cache := make(map[string]*holidayDataset)
 	for _, def := range cfg.SLADefinitions {
 		for name, policy := range def.SLAs {
 			ref := PolicyRef{def.SLALabel, name}
@@ -63,24 +69,47 @@ func NewCalendarEngine(cfg Config, holidays HolidayProvider) (*CalendarEngine, e
 			}
 			compiled := compiledPolicy{location: loc, windows: windows, additionalDates: map[string]bool{}}
 			if h := policy.Holidays; h != nil {
-				compiled.country, compiled.subdivision = h.Country, h.Subdivision
-				if h.Country != "" {
-					if err := holidays.Validate(h.Country, h.Subdivision); err != nil {
+				if h.Dataset != nil {
+					path, err := canonicalDatasetPath(*h.Dataset)
+					if err != nil {
 						return nil, fmt.Errorf("SLA (%s, %s): %w", ref.SLALabel, ref.SLAValue, err)
 					}
+					dataset := cache[path]
+					if dataset == nil {
+						dataset, err = loadHolidayDataset(path)
+						if err != nil {
+							return nil, fmt.Errorf("SLA (%s, %s): %w", ref.SLALabel, ref.SLAValue, err)
+						}
+						cache[path] = dataset
+					}
+					compiled.dataset = dataset
 				}
 				for _, date := range h.AdditionalDates {
 					compiled.additionalDates[date] = true
 				}
 			}
-			// JSON sorts map keys, so policy versions do not depend on YAML map
-			// order. Include selection namespace, search bounds and rule versions.
+			// Hash effective semantics, never file paths or provider provenance.
+			effective := policy
+			datasetHash := ""
+			if policy.Holidays != nil {
+				normalized := *policy.Holidays
+				normalized.Dataset = nil
+				normalized.AdditionalDates = make([]string, 0, len(compiled.additionalDates))
+				for date := range compiled.additionalDates {
+					normalized.AdditionalDates = append(normalized.AdditionalDates, date)
+				}
+				sort.Strings(normalized.AdditionalDates)
+				effective.Holidays = &normalized
+			}
+			if compiled.dataset != nil {
+				datasetHash = compiled.dataset.semanticHash
+			}
 			encoded, err := json.Marshal(struct {
-				Ref             PolicyRef
-				Policy          Policy
-				HorizonDays     int
-				Provider, Rules string
-			}{ref, policy, cfg.EvaluationHorizonDays, holidays.Version(), "wall-clock-v1"})
+				Ref            PolicyRef
+				Policy         Policy
+				HorizonDays    int
+				Dataset, Rules string
+			}{ref, effective, cfg.EvaluationHorizonDays, datasetHash, calendarRulesVersion})
 			if err != nil {
 				return nil, err
 			}
@@ -88,6 +117,9 @@ func NewCalendarEngine(cfg Config, holidays HolidayProvider) (*CalendarEngine, e
 			compiled.version = hex.EncodeToString(digest[:])
 			engine.policies[ref] = compiled
 		}
+	}
+	if err := engine.coverageAt(now); err != nil {
+		return nil, err
 	}
 	return engine, nil
 }
@@ -112,14 +144,23 @@ func (e *CalendarEngine) Evaluate(ctx context.Context, _ PolicyInput, ref Policy
 	// UTC here is a coordinate for civil dates, never the instant of local
 	// midnight. AddDate advances calendar dates across DST and skipped dates.
 	date := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	if p.dataset != nil && !p.dataset.covers(date) {
+		e.observeDataset(false, errDatasetCoverage)
+		return Decision{}, &EvaluationError{"calendar_error", errDatasetCoverage}
+	}
 	decision := Decision{Reason: ReasonOutsideWindow, PolicyVersion: p.version}
 	for day := 0; day < e.horizonDays && date.Year() <= 9999; day++ {
 		if err := ctx.Err(); err != nil {
 			return Decision{}, &EvaluationError{"cancelled", err}
 		}
+		// Coverage applies even on unscheduled days and explicit additions.
+		if p.dataset != nil && !p.dataset.covers(date) {
+			e.observeDataset(false, errDatasetCoverage)
+			return Decision{}, &EvaluationError{"calendar_error", errDatasetCoverage}
+		}
 		windows := p.windows[date.Weekday()]
 		if len(windows) != 0 || day == 0 {
-			excluded, reason, err := e.excluded(ctx, p, date)
+			excluded, reason, err := e.excluded(p, date)
 			if err != nil {
 				return Decision{}, &EvaluationError{"calendar_error", err}
 			}
@@ -154,15 +195,51 @@ func (e *CalendarEngine) Evaluate(ctx context.Context, _ PolicyInput, ref Policy
 	return decision, nil
 }
 
-func (e *CalendarEngine) excluded(ctx context.Context, p compiledPolicy, date time.Time) (bool, string, error) {
+func (e *CalendarEngine) excluded(p compiledPolicy, date time.Time) (bool, string, error) {
+	if p.dataset != nil && !p.dataset.covers(date) {
+		e.observeDataset(false, errDatasetCoverage)
+		return false, "", errDatasetCoverage
+	}
 	if p.additionalDates[date.Format("2006-01-02")] {
 		return true, ReasonAdditionalDate, nil
 	}
-	if p.country != "" {
-		holiday, err := e.holidays.IsHoliday(ctx, date, p.country, p.subdivision)
-		return holiday, ReasonHoliday, err
+	if p.dataset != nil {
+		holiday := p.dataset.dates[date.Format("2006-01-02")]
+		e.observeDataset(holiday, nil)
+		return holiday, ReasonHoliday, nil
 	}
 	return false, "", nil
+}
+
+// A rolling readiness window gives operators horizon-length warning before the
+// finite data ends. Per-evaluation guards still cover historical/future inputs.
+// Boundary allowance includes the previous civil day and three future days.
+func (e *CalendarEngine) coverageAt(now time.Time) error {
+	for ref, p := range e.policies {
+		if p.dataset == nil {
+			continue
+		}
+		local := now.In(p.location)
+		date := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, time.UTC)
+		if !p.dataset.covers(date.AddDate(0, 0, -1)) || !p.dataset.covers(date.AddDate(0, 0, e.horizonDays+3)) {
+			return fmt.Errorf("SLA (%s, %s): ICS coverage must include yesterday through today + horizon + 3 local dates", ref.SLALabel, ref.SLAValue)
+		}
+	}
+	return nil
+}
+
+func (e *CalendarEngine) observeDataset(holiday bool, err error) {
+	if e.metrics == nil {
+		return
+	}
+	result := "not_holiday"
+	if holiday {
+		result = "holiday"
+	}
+	if err != nil {
+		result = "error"
+	}
+	e.metrics.holidays.WithLabelValues(result).Inc()
 }
 
 // nextOnDate maps wall-clock intervals to real UTC intervals using each zone

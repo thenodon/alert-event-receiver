@@ -11,6 +11,11 @@ the repository root unless a guide says otherwise.
 | Diagnose problems | [Operations](event-receiver/operations.md) | [Operations and configuration changes](sla-proxy/operations.md) |
 | Look up contracts | [Webhook, OTLP fields and metrics](event-receiver/reference.md) | [Webhook, payloads, metrics and logs](sla-proxy/reference.md) |
 
+## Holiday data
+
+[Offline ICS datasets](sla-proxy/holiday-datasets.md) let operators add countries
+and subdivisions through local files and YAML, without runtime Python or network.
+
 ## Shared tools and advanced operations
 
 - [Configuration examples](examples/README.md): minimal scenarios and the complete SLA configuration.

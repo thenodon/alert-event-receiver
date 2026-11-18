@@ -22,7 +22,7 @@ func engineFor(t *testing.T, policy Policy, horizon int) *CalendarEngine {
 	cfg := testConfig(t)
 	cfg.EvaluationHorizonDays = horizon
 	cfg.SLADefinitions = []Definition{{SLALabel: "sla_id", SLAs: map[string]Policy{"business": policy}}}
-	e, err := NewCalendarEngine(cfg, CountryHolidays{})
+	e, err := NewCalendarEngine(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestWeeklyEvaluationAndExactBoundaries(t *testing.T) {
 
 func TestHolidayPrecedenceAndYearBoundary(t *testing.T) {
 	p := fullDayPolicy()
-	p.Holidays = &Holidays{Country: "SE", AdditionalDates: []string{"2026-12-31"}}
+	p.Holidays = &Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics")), AdditionalDates: []string{"2026-12-31"}}
 	e := engineFor(t, p, 370)
 	assertEvaluation(t, e, "2026-12-31T12:00:00+01:00", "2027-01-01T23:00:00Z", ReasonAdditionalDate, false)
 	assertEvaluation(t, e, "2027-01-01T12:00:00+01:00", "2027-01-01T23:00:00Z", ReasonHoliday, false)
@@ -102,7 +102,7 @@ func TestHolidayPrecedenceAndYearBoundary(t *testing.T) {
 	assertEvaluation(t, engineFor(t, p, 370), "2028-02-29T12:00:00+01:00", "2028-02-29T23:00:00Z", ReasonAdditionalDate, false)
 	// Business-hour search skips Friday's holiday and the following weekend.
 	p = businessPolicy()
-	p.Holidays = &Holidays{Country: "SE"}
+	p.Holidays = &Holidays{Dataset: datasetPath(fixtureDataset(t, "holidays_se.ics"))}
 	assertEvaluation(t, engineFor(t, p, 370), "2026-12-31T17:00:00+01:00", "2027-01-04T07:00:00Z", ReasonOutsideWindow, false)
 }
 
@@ -164,26 +164,11 @@ func TestHorizonExhaustionAndEmptyWeek(t *testing.T) {
 	assertEvaluation(t, engineFor(t, p, 370), "2026-11-09T12:00:00+01:00", "", ReasonHorizonExhausted, false)
 }
 
-type brokenHolidays struct{ validationErr, evaluationErr error }
-
-func (brokenHolidays) Version() string                 { return "test-provider-v1" }
-func (p brokenHolidays) Validate(string, string) error { return p.validationErr }
-func (p brokenHolidays) IsHoliday(context.Context, time.Time, string, string) (bool, error) {
-	return false, p.evaluationErr
-}
-
 func TestEvaluatorErrorsAreNotAuthoritativeEligibility(t *testing.T) {
-	cfg := testConfig(t)
-	sentinel := errors.New("calendar unavailable")
-	if _, err := NewCalendarEngine(cfg, brokenHolidays{validationErr: sentinel}); !errors.Is(err, sentinel) {
-		t.Fatal(err)
-	}
-	engine, err := NewCalendarEngine(cfg, brokenHolidays{evaluationErr: sentinel})
-	if err != nil {
-		t.Fatal(err)
-	}
-	d, err := engine.Evaluate(context.Background(), PolicyInput{}, PolicyRef{"sla_id", "business"}, "", instant(t, "2026-11-09T09:00:00+01:00"))
-	if !errors.Is(err, sentinel) || d.Eligible || !d.NextEvaluationAt.IsZero() || d.PolicyVersion != "" {
+	cfg := datasetConfig(t, fixtureDataset(t, "holidays_se.ics"))
+	engine := datasetEngine(t, cfg)
+	d, err := engine.Evaluate(context.Background(), PolicyInput{}, PolicyRef{"sla_id", "business"}, "", instant(t, "2041-11-09T09:00:00+01:00"))
+	if !errors.Is(err, errDatasetCoverage) || d.Eligible || !d.NextEvaluationAt.IsZero() || d.PolicyVersion != "" {
 		t.Fatal("authoritative decision on error", d, err)
 	}
 	_, err = engine.Evaluate(context.Background(), PolicyInput{}, PolicyRef{"missing", "business"}, "", time.Now())
@@ -205,7 +190,7 @@ func TestEvaluatorErrorsAreNotAuthoritativeEligibility(t *testing.T) {
 
 func TestCompiledPoliciesIndependentVersionedAndConcurrent(t *testing.T) {
 	cfg := testConfig(t)
-	e, err := NewCalendarEngine(cfg, CountryHolidays{})
+	e, err := NewCalendarEngine(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +206,7 @@ func TestCompiledPoliciesIndependentVersionedAndConcurrent(t *testing.T) {
 	// Mutating the source configuration cannot mutate compiled policy state.
 	p := cfg.SLADefinitions[0].SLAs["business"]
 	p.Schedule["monday"] = []string{"00:00-24:00"}
-	changed, err := NewCalendarEngine(cfg, CountryHolidays{})
+	changed, err := NewCalendarEngine(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +225,7 @@ func TestCompiledPoliciesIndependentVersionedAndConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 	// Reloading the same YAML preserves versions despite map iteration order.
-	fresh, err := NewCalendarEngine(testConfig(t), CountryHolidays{})
+	fresh, err := NewCalendarEngine(testConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}

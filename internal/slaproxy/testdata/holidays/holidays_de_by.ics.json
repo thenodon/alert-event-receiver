@@ -1,0 +1,11 @@
+{
+  "country": "DE",
+  "first_year": 2020,
+  "format": "ics-holiday-dataset",
+  "ics_sha256": "81eb560bdec8ded0ccc65b7de5e669f788ddab5fe2c53106f4aeaa2eac8e1ba7",
+  "last_year": 2040,
+  "schema_version": 1,
+  "source": "python-holidays",
+  "source_version": "0.108",
+  "subdivision": "BY"
+}
