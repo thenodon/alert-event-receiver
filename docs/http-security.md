@@ -6,7 +6,9 @@ HTTP or HTTPS, with no second port or HTTP-to-HTTPS redirect. The SLA proxy has
 **no inbound security YAML fields**; outbound sink authentication/TLS is separate.
 
 **Basic Auth over cleartext HTTP exposes credentials on untrusted networks.**
-Use native HTTPS or a trusted TLS-terminating reverse proxy with an isolated
+Basic Authentication works over both HTTP and HTTPS; plain HTTP does not protect
+credentials from interception. Use native HTTPS or a trusted TLS-terminating
+reverse proxy such as Envoy with an isolated
 backend network. Native TLS is optional so trusted proxy deployments can keep
 HTTP on the backend. Basic Auth provides no rate limiting or account management.
 
@@ -29,13 +31,28 @@ or `${NAME}` interpolation in a `PASSWORD_ENV` setting. Neither application load
 an `.env` file itself. The [shared Bash example](examples/http-security.env) may be
 sourced explicitly or adapted to a service manager/container secret environment.
 
+Explicitly empty values are treated as unset. TLS selection follows this table:
+
+| `HTTP_TLS_CERT_FILE` | `HTTP_TLS_KEY_FILE` | Result |
+|---|---|---|
+| Unset | Unset | HTTP |
+| Empty | Empty | HTTP |
+| Valid certificate path | Valid matching key path | HTTPS |
+| Set | Unset or empty | Startup error |
+| Unset or empty | Set | Startup error |
+| Invalid certificate/key | Configured | Startup error |
+
+Mixed unset/empty TLS values also select HTTP. Both variables must contain valid
+paths to a readable, matching certificate/key pair to enable HTTPS.
+
 An entirely empty pair disables that feature. A partial pair, whitespace-only
 username/reference, missing/empty referenced password, unsafe credential, unreadable
 or malformed PEM, or mismatched certificate/key fails startup before listening.
 Errors do not include resolved passwords or private-key material. Authentication
 is verified per request with fixed-size hashes and constant-time comparisons.
 
-The service retains a startup snapshot. Restart after changing passwords,
+Certificates and Basic Auth credentials are loaded at startup. The service retains
+a startup snapshot. Restart after changing passwords,
 references or certificate/key contents; there is no hot reload. These settings
 have no effect on SLA policy hashes, epochs, frozen bindings or delivery identities.
 Do not bump a policy epoch solely for inbound security rotation.

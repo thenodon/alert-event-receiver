@@ -54,7 +54,7 @@ func TestReceiverEndpointSecurity(t *testing.T) {
 				}
 				proc := &securityProcessor{}
 				server := newHTTPServer("127.0.0.1:0", security, webhook.NewHandler(proc, slog.New(slog.NewTextHandler(io.Discard, nil))))
-				if server.ReadTimeout != 10*time.Second || server.WriteTimeout != 15*time.Second || server.IdleTimeout != 60*time.Second {
+				if server.ReadHeaderTimeout != 5*time.Second || server.ReadTimeout != 10*time.Second || server.WriteTimeout != 15*time.Second || server.IdleTimeout != 60*time.Second {
 					t.Fatal("timeouts changed")
 				}
 				listener, err := net.Listen("tcp", server.Addr)

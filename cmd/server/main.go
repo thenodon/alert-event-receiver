@@ -139,7 +139,13 @@ func newHTTPServer(address string, security httpsecurity.Config, webhookHandler 
 	mux.Handle("POST /webhook", security.Webhook(webhookHandler))
 	mux.Handle("GET /metrics", security.Metrics(promhttp.Handler()))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	return &http.Server{Addr: address, Handler: mux, ReadTimeout: 10 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
+	return &http.Server{
+		Addr: address, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 func shutdownOTel(logger *slog.Logger, shutdown func(context.Context) error, timeout time.Duration) error {
