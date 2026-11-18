@@ -16,6 +16,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/andersh/alertmanager_event_receiver/internal/config"
+	"github.com/andersh/alertmanager_event_receiver/internal/httpsecurity"
 	"github.com/andersh/alertmanager_event_receiver/internal/processor"
 	"github.com/andersh/alertmanager_event_receiver/internal/state"
 	"github.com/andersh/alertmanager_event_receiver/internal/telemetry"
@@ -44,6 +45,12 @@ func run() (exitCode int) {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("failed to load config", "component", "config", "operation", "load", "error", telemetry.SafeError(err))
+		return 1
+	}
+
+	security, err := httpsecurity.LoadFromEnv()
+	if err != nil {
+		logger.Error("invalid HTTP security configuration", "component", "http", "operation", "configure", "error", err.Error())
 		return 1
 	}
 
@@ -85,26 +92,12 @@ func run() (exitCode int) {
 	emitter := telemetry.NewOTelEmitter("alert-event-receiver", version)
 	proc := processor.New(store, emitter, cfg.ClosedStateTTL, cfg.IdempotencyTTL, logger)
 
-	// HTTP routes.
-	mux := http.NewServeMux()
-	mux.Handle("POST /webhook", webhook.NewHandler(proc, logger))
-	mux.Handle("GET /metrics", promhttp.Handler())
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-
-	srv := &http.Server{
-		Addr:         cfg.Address,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	srv := newHTTPServer(cfg.Address, security, webhook.NewHandler(proc, logger))
 
 	serveDone := make(chan error, 1)
 	go func() {
-		logger.Info("starting HTTP server", "component", "http", "operation", "serve", slog.String("addr", srv.Addr))
-		serveDone <- srv.ListenAndServe()
+		logger.Info("starting HTTP server", "component", "http", "operation", "serve", slog.String("addr", srv.Addr), "scheme", security.Scheme())
+		serveDone <- security.ListenAndServe(srv)
 	}()
 
 	var serveErr error
@@ -138,6 +131,21 @@ func run() (exitCode int) {
 		exitCode = 1
 	}
 	return exitCode
+}
+
+// Keep routing and server timeouts common to production and listener tests.
+func newHTTPServer(address string, security httpsecurity.Config, webhookHandler http.Handler) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("POST /webhook", security.Webhook(webhookHandler))
+	mux.Handle("GET /metrics", security.Metrics(promhttp.Handler()))
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	return &http.Server{
+		Addr: address, Handler: mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 }
 
 func shutdownOTel(logger *slog.Logger, shutdown func(context.Context) error, timeout time.Duration) error {

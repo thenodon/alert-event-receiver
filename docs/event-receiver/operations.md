@@ -166,8 +166,20 @@ Valkey keys. Deletion is not a delivery replay mechanism and can create duplicat
 or misclassified transitions. TTL changes affect future expirations only. Moving
 to another server/database starts a separate state domain unless data is preserved.
 Protect labels, annotations, OTLP headers and Valkey credentials; HTTP ingress
-needs external authentication/TLS when exposed beyond a trusted network.
+supports native HTTPS/Basic Auth or a trusted TLS proxy; see the shared guide.
 
 For exact key formats, TTL investigation and step-by-step diagnostics, use
 [Redis/Valkey debugging](../redis-debugging.md). The receiver has no supported
 manual replay or durable outbox repair procedure.
+
+## Secure webhook and metrics access
+
+Use the [shared inbound security guide](../http-security.md) for native HTTPS,
+independent Basic Auth, trusted-proxy deployments, CA trust and smoke tests.
+Defaults remain HTTP/no auth. Security errors fail before listening. Unauthorized
+requests return 401 before webhook processing; check client credentials rather
+than investigating lifecycle or sink retries. Health probes bypass Basic Auth
+but must use HTTPS when TLS is configured. Restrict probe/backend access through
+network controls. Restart after password/certificate rotation. Inbound security
+is independent of outbound connections and does not require deleting Valkey state
+or changing SLA policy epochs.

@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/andersh/alertmanager_event_receiver/internal/httpsecurity"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 )
@@ -20,6 +21,7 @@ import (
 // Service owns an independent configuration, registry and HTTP lifecycle.
 // Receiver processing/telemetry are independent. Valkey is used only when durable processing is enabled.
 type Service struct {
+	security      httpsecurity.Config
 	cfg           Config
 	logger        *slog.Logger
 	metrics       *metrics
@@ -42,7 +44,11 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	if logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
-	s := &Service{cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
+	security, err := httpsecurity.LoadFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("configure inbound HTTP security: %w", err)
+	}
+	s := &Service{security: security, cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
 	sinks := make(map[string]Sink, len(cfg.Delivery.Sinks))
 	initialized := false
 	defer func() {
@@ -110,8 +116,8 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	}
 	s.ready.Store(true)
 	mux := http.NewServeMux()
-	mux.HandleFunc(cfg.WebhookPath, s.webhook)
-	mux.Handle("GET /metrics", promhttp.HandlerFor(s.metrics.registry, promhttp.HandlerOpts{}))
+	mux.Handle(cfg.WebhookPath, security.Webhook(http.HandlerFunc(s.webhook)))
+	mux.Handle("GET /metrics", security.Metrics(promhttp.HandlerFor(s.metrics.registry, promhttp.HandlerOpts{})))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -140,6 +146,7 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	return s, nil
 }
 
+// Handler includes endpoint authentication. Direct calls bypass listener TLS only.
 func (s *Service) Handler() http.Handler { return s.handler }
 
 func (s *Service) mode() string {
@@ -195,9 +202,9 @@ func (s *Service) Serve(ctx context.Context, listener net.Listener) error {
 		runtimeDone = make(chan error, 1)
 		go func() { runtimeDone <- s.runDurable(runtimeCtx) }()
 	}
-	s.logger.Info("starting HTTP server", "component", "http", "operation", "serve", "addr", listener.Addr().String())
+	s.logger.Info("starting HTTP server", "component", "http", "operation", "serve", "addr", listener.Addr().String(), "scheme", s.security.Scheme())
 	done := make(chan error, 1)
-	go func() { done <- server.Serve(listener) }()
+	go func() { done <- s.security.Serve(server, listener) }()
 	var serveErr error
 	var runtimeErr error
 	runtimeReturned := false

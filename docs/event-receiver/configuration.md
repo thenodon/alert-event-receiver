@@ -28,9 +28,32 @@ keys. Open firing state has no TTL. The receiver does not expose Valkey username
 TLS, Sentinel or Cluster settings; do not assume SLA proxy settings apply here.
 
 The HTTP server has fixed read/write/idle timeouts of 10/15/60 seconds. HTTP drain
-is bounded to 10 seconds and OTel shutdown to 5 seconds. There is no configurable
-inbound authentication, TLS or request-body size limit; deploy behind appropriate
-network controls/reverse proxy limits.
+is bounded to 10 seconds and OTel shutdown to 5 seconds. The receiver has no configurable
+request-body size limit; use appropriate network controls/reverse proxy limits.
+
+## Inbound HTTPS and endpoint authentication
+
+Both services use the same optional environment variables (strings, empty by
+default). These are not YAML settings:
+
+| Variable | Purpose |
+|---|---|
+| `HTTP_WEBHOOK_BASIC_AUTH_USERNAME` | Webhook username |
+| `HTTP_WEBHOOK_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_METRICS_BASIC_AUTH_USERNAME` | Independent metrics username |
+| `HTTP_METRICS_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
+| `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
+
+An entirely empty pair disables that feature; partial/invalid pairs and missing
+referenced passwords fail startup. HTTPS uses the existing listener and port.
+The health route bypasses authentication but still uses the listener protocol.
+The receiver has no readiness route.
+Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
+networks; use HTTPS or an isolated backend behind a trusted TLS proxy. See the
+[shared security reference](../http-security.md) for constraints, examples, CA
+trust, Alertmanager/Prometheus configuration and rotation. Inbound security is
+independent of outbound OTLP, Valkey and HTTP sink security.
 
 ## OTLP destination and identity
 
