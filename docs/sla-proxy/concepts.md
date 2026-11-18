@@ -44,6 +44,52 @@ The calendar engine determines whether startsAt falls inside an SLA window and f
 
 For a resolved alert, the active period begins at startsAt and ends at endsAt. The alert is no longer considered active at the exact moment endsAt occurs.
 
+### Alert lifecycle versus proxy processing
+
+To understand how the SLA Proxy makes decisions, it is important to distinguish two timelines:
+
+- **Alert lifecycle:** When an alert actually started and resolved, as reported by Alertmanager through `startsAt` and `endsAt`.
+- **Proxy processing:** When the proxy received those notifications, evaluated SLA eligibility, authorized delivery, and recorded successful delivery receipts.
+
+These timelines are not necessarily synchronized. Notifications can arrive late, and the proxy cannot know about a resolution until it receives the corresponding notification.
+
+**Example: An alert resolves before SLA opens**
+
+Assume the SLA window opens at 08:00:
+
+1. At 07:30, the alert fires and the proxy receives the firing notification.
+2. At 07:45, the alert resolves.
+3. At 08:00, the SLA window opens.
+
+If the proxy receives the resolution notification before 08:00, it knows the alert is no longer active and does not authorize firing delivery.
+
+However, if the resolution notification is delayed until 08:10, the proxy still considers the alert firing at 08:00. It may therefore authorize and deliver the firing notification.
+
+When the delayed resolution arrives, the proxy records the actual resolution time of 07:45. If a destination has a successful firing receipt, it can subsequently receive the resolution notification.
+
+```mermaid
+flowchart TB
+subgraph AL["Actual alert lifecycle"]
+direction LR
+A["07:30 - Alert fires"]
+B["07:45 - Alert resolves"]
+A --> B
+end
+
+    subgraph PX["SLA Proxy processing"]
+        direction LR
+        C["07:30 - Firing webhook received"]
+        D["08:00 - SLA window opens"]
+        E["08:00 - Firing delivery may be authorized"]
+        F["08:10 - Resolved webhook received"]
+        C --> D --> E --> F
+    end
+
+    A -.-> C
+    B -. "Notification delayed" .-> F
+```
+**The key principle:** The SLA calendar determines when firing delivery is permitted. The proxy's durable known state determines whether the alert is considered active at that time. Once a destination has a successful firing receipt, its resolution may be delivered even outside the SLA window.
+
 ### How firing and resolved alerts interact with SLA windows
 
 An alert may start before an SLA window opens, remain active during the window, and resolve after the window closes.
@@ -52,7 +98,7 @@ The SLA Proxy uses the alert's start and resolution times to determine whether t
 
 For example, with an SLA window of **08:00–17:00**:
 
-| Alert fires | Alert resolves | Behavior |
+|Alert starts at | Alert resolves at | Expected behavior when notifications arrive in time|
 |---|---|---|
 | 07:30 | 07:45 | The alert resolves before SLA opens. It is not eligible for firing delivery. |
 | 07:30 | 08:00 | The alert resolves exactly when SLA opens. There is no overlap, so firing delivery is not authorized if the resolution is already known. |
@@ -60,6 +106,8 @@ For example, with an SLA window of **08:00–17:00**:
 | 09:00 | 10:00 | The alert starts during SLA and can be delivered immediately. |
 | 16:55 | 17:30 | The alert starts during SLA. Its firing notification can be delivered, and its resolution can be delivered after SLA closes. |
 | 17:05 | 18:00 | The alert starts after SLA closes and resolves before another SLA window opens. It is not eligible for firing delivery. |
+
+These examples assume the proxy receives the resolution before making a conflicting delivery authorization decision. Delayed notifications can produce different delivery behavior, as explained above.
 
 **How the proxy handles firing notifications**
 
@@ -74,7 +122,7 @@ When a resolution notification arrives, the proxy records that the occurrence ha
 - If the alert resolved before becoming eligible, and firing delivery was not yet authorized, the pending firing delivery is cancelled.
 - If firing delivery was already authorized, an external delivery attempt may already be in progress.
 - If a destination has a recorded successful firing delivery, the resolution can be sent to that destination even when the SLA window is closed.
-- If a destination never received a firing notification, the proxy does not send it a standalone resolution.
+- A resolution is sent to a destination only after the proxy has recorded a successful firing delivery receipt for that destination.
 
 **Important:** The proxy makes these decisions based on the notifications it has received, not by continuously checking whether the alert is still firing in Alertmanager. A delayed or lost resolution notification can therefore affect delivery decisions.
 
