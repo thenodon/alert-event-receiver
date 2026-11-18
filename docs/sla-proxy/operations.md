@@ -224,9 +224,9 @@ selected alerts to reach both child routes. Validate the final configuration
 with `amtool check-config` and test routing with your Alertmanager before
 deployment.
 
-Use an authenticated TLS reverse proxy or trusted private network for ingress.
-No inbound auth/TLS settings are built into this application. For HTTP outbound
-security and exact payload behavior see [reference](reference.md#http-destination-contract).
+Use [native HTTPS and endpoint Basic Auth](../http-security.md), or a trusted TLS
+reverse proxy with an isolated backend. For HTTP outbound security and exact
+payload behavior see [reference](reference.md#http-destination-contract).
 
 ## Advanced recovery
 
@@ -249,3 +249,19 @@ additions. Readiness failure does not cancel already authorized sends or erase
 receipts. Known resolutions/saved decisions follow their pinned durable semantics.
 Restoring old bytes must also satisfy startup coverage; if old data has expired,
 exact restoration may be unavailable. No automatic migration/redrive is provided.
+
+## Secure webhook and metrics access
+
+Use the [shared inbound security guide](../http-security.md) for native HTTPS,
+independent Basic Auth, trusted-proxy deployments, CA trust and smoke tests.
+Defaults remain HTTP/no auth. Security errors fail before listening. Unauthorized
+requests return 401 before webhook processing; check client credentials rather
+than investigating lifecycle or sink retries. Health probes bypass Basic Auth
+but must use HTTPS when TLS is configured. Restrict probe/backend access through
+network controls. Restart after password/certificate rotation. Inbound security
+is independent of outbound connections and does not require deleting Valkey state
+or changing SLA policy epochs.
+
+`/readyz` also bypasses Basic Auth; its existing Valkey/calendar readiness checks
+remain in effect. Direct `Service.Handler()` tests include authentication but
+intentionally bypass listener TLS.

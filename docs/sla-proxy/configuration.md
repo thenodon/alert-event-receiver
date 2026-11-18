@@ -31,10 +31,33 @@ Changes to an existing durable catalog need the procedure in
 | `delivery.enabled` | boolean | `false` | Enable asynchronous sink calls; requires durable enabled | Common |
 
 All configured sinks receive structural validation in every mode. Runtime sinks,
-HTTP clients/transports and HTTP credential resolution are created only when
-delivery is enabled. Missing HTTP credential environment variables do not prevent
+Outbound HTTP clients/transports and sink credential resolution are created only when
+delivery is enabled. Missing outbound HTTP credential environment variables do not prevent
 observe-only or state-only startup. Durable Valkey credentials are needed whenever
 durable mode is enabled.
+
+## Inbound HTTPS and endpoint authentication
+
+Both services use the same optional environment variables (strings, empty by
+default). These are not YAML settings:
+
+| Variable | Purpose |
+|---|---|
+| `HTTP_WEBHOOK_BASIC_AUTH_USERNAME` | Webhook username |
+| `HTTP_WEBHOOK_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_METRICS_BASIC_AUTH_USERNAME` | Independent metrics username |
+| `HTTP_METRICS_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
+| `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
+
+An entirely empty pair disables that feature; partial/invalid pairs and missing
+referenced passwords fail startup. HTTPS uses the existing listener and port.
+Health/readiness routes bypass authentication but still use the listener protocol.
+Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
+networks; use HTTPS or an isolated backend behind a trusted TLS proxy. See the
+[shared security reference](../http-security.md) for constraints, examples, CA
+trust, Alertmanager/Prometheus configuration and rotation. Inbound security is
+independent of outbound OTLP, Valkey and HTTP sink security.
 
 ## Policies and calendars
 
@@ -146,7 +169,8 @@ Redirects are rejected. HTTP transport can use trusted process proxy environment
 settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) through Go's default transport;
 these are not YAML options. Loopback destinations bypass the standard proxy lookup.
 Protect configured endpoints, credentials, Valkey payloads and outbound connectivity.
-Ingress authentication/TLS requires a reverse proxy or trusted network.
+Inbound listener security is configured separately through the shared environment
+variables above; it does not change outbound destination identity.
 
 The destination registry includes type, URL/query, timeout, authentication
 references/modes and idempotency setting. Changing/removing registered destinations

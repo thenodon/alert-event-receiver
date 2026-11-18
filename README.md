@@ -80,9 +80,10 @@ complete annotated configuration reference.
   followed by an unconfirmed receipt can cause duplicates. HTTP 2xx proves API
   acceptance, not completed downstream processing. Lost resolutions can leave
   alerts firing in known state.
-- The applications provide no inbound HTTP authentication or TLS configuration.
-  Use trusted networking or an authenticated TLS reverse proxy. Protect stored
-  alert labels, annotations and credentials. Use HTTPS for remote Basic Auth.
+- Both applications support optional native HTTPS and independent webhook/metrics
+  Basic Auth through the same [security environment](docs/http-security.md). Defaults
+  are HTTP/no auth. Use HTTPS or a trusted TLS proxy with isolated networking;
+  cleartext Basic Auth is unsafe on untrusted networks. Protect stored alert data.
 
 ## Documentation
 

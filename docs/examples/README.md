@@ -6,6 +6,7 @@ network access and HTTPS for production; demo namespaces are not migrations.
 
 | File | Purpose | Prerequisites |
 |---|---|---|
+| [http-security.env](http-security.env) | Optional shared inbound HTTPS and Basic Auth for either application | Certificate/key pair and separately supplied secret environment |
 | [event-receiver.env](event-receiver.env) | Minimal Bash environment for the receiver | Local Valkey and VictoriaLogs |
 | [alert-sla-proxy-ics.yaml](alert-sla-proxy-ics.yaml) | File-backed holidays, independent of compiled countries | Install the checked-in ICS/manifest pair or generate another dataset offline |
 | [alert-sla-proxy-observe.yaml](alert-sla-proxy-observe.yaml) | Minimal stateless policy observation | None |

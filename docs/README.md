@@ -18,6 +18,8 @@ and subdivisions through local files and YAML, without runtime Python or network
 
 ## Shared tools and advanced operations
 
+- [Inbound HTTP security](http-security.md): shared HTTPS and endpoint Basic Auth for both applications.
+
 - [Configuration examples](examples/README.md): minimal scenarios and the complete SLA configuration.
 - [Redis/Valkey debugging](redis-debugging.md): key inspection, retention, immutable registries and corruption recovery.
 - [alertload](alertload.md): deterministic load generation, mixed scenarios and optional verification.
