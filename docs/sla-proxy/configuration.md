@@ -2,6 +2,7 @@
 
 [Getting started](getting-started.md) · [Concepts](concepts.md) · [Operations](operations.md)
 
+Start with [getting started](getting-started.md) to validate the three operating modes.
 Use [minimal examples](../examples/README.md) for common tasks and
 [alert-sla-proxy.yaml](../examples/alert-sla-proxy.yaml) for every configurable
 field. YAML is loaded once at startup. Unknown/duplicate keys and extra YAML
@@ -13,10 +14,11 @@ CLI flags: `-config` (string, default `alert-sla-proxy.yaml` in the current dire
 configuration-check-only flag is provided. Do not start a production durable
 configuration merely to validate it: startup can activate its namespace catalog.
 
-**Required** values define policy/HTTP destinations. **Common** settings select a
-mode, address and credentials. Leave **advanced** tuning at its defaults initially.
-Changes to an existing durable catalog need the procedure in
-[safe configuration changes](operations.md#change-policies-and-destinations).
+In the tables below, **Required** identifies fields that must be supplied when
+applicable; **Common** identifies settings normally changed during deployment;
+and **Advanced** identifies tuning best left at defaults initially. Defaults do
+not override mode-specific requirements. Changes to an existing durable catalog
+need the procedure in [safe configuration changes](operations.md#change-policies-and-destinations).
 
 ## Listener and mode
 
@@ -30,11 +32,15 @@ Changes to an existing durable catalog need the procedure in
 | `durable.enabled` | boolean | `false` | Enable Valkey state and scheduling | Common |
 | `delivery.enabled` | boolean | `false` | Enable asynchronous sink calls; requires durable enabled | Common |
 
+The modes are `observe_only` (both disabled), `durable_state_only` (durable
+enabled, delivery disabled), and `delivery_enabled` (both enabled). Delivery
+cannot run without durable state.
+
 All configured sinks receive structural validation in every mode. Runtime sinks,
-Outbound HTTP clients/transports and sink credential resolution are created only when
-delivery is enabled. Missing outbound HTTP credential environment variables do not prevent
-observe-only or state-only startup. Durable Valkey credentials are needed whenever
-durable mode is enabled.
+outbound HTTP clients/transports and sink credential resolution are created only
+when delivery is enabled. Missing outbound HTTP credential environment variables
+do not prevent observe-only or state-only startup. Durable Valkey credentials
+are needed whenever durable mode is enabled.
 
 ## Inbound HTTPS and endpoint authentication
 
@@ -73,9 +79,11 @@ independent of outbound OTLP, Valkey and HTTP sink security.
 | `holidays.additional_dates` | string list | absent | Exact valid `YYYY-MM-DD` local dates; allowed without a dataset | Common |
 
 Policy field paths in the last rows are relative to
-`sla_definitions[].slas.<name>`. Definitions are independent namespaces even when
-policy names match. The first nonempty matching label selects its definition;
-unknown values are skipped without fallback. See [selection](concepts.md#selecting-a-policy).
+`sla_definitions[].slas.<name>`. Definitions are independent policy scopes even
+when policy names match. The first nonempty matching label selects its
+definition; unknown values are skipped without fallback. Selection is distinct
+from calendar eligibility: a valid policy can still be pending or ineligible.
+See [selection](concepts.md#selecting-a-policy).
 
 Weekday keys are lowercase full English names. Windows use exact `HH:MM-HH:MM`
 syntax; `24:00` is allowed only as an end. Equal start/end is invalid; use
@@ -111,12 +119,18 @@ informational provenance and data selection respectively.
 | `retention.completed_payload` | duration | `720h` | Positive payload retention after first durable resolution acceptance | Advanced |
 | `retention.tombstone` | duration | `2160h` | Longer than payload retention, at most 10 × 365 days | Advanced |
 
-Use a dedicated namespace per Alertmanager lifecycle domain. No Cluster discovery,
-Sentinel, custom CA or client-certificate fields are provided. Configure persistence
-and noeviction on the server; application acceptance is not a separate disk/replica
-receipt. Unresolved records have no automatic expiry. Outstanding/held delivery
-pins required state past ordinary retention. Changes to retention do not rewrite
-existing stored deadlines. See [operations](operations.md#retention-and-restart).
+Use a dedicated namespace per Alertmanager lifecycle domain. Durable webhook
+acceptance means selected inputs were committed to Valkey; it does not imply a
+separate disk/replica durability barrier or sink delivery. Use the same namespace,
+catalog and epoch for ordinary restarts; coordinate a higher epoch for catalog
+changes.
+
+No Cluster discovery, Sentinel, custom CA or client-certificate fields are
+provided. Configure persistence and noeviction on the server; application
+acceptance is not a separate disk/replica receipt. Unresolved records have no
+automatic expiry. Outstanding/held delivery pins required state past ordinary
+retention. Changes to retention do not rewrite existing stored deadlines.
+See [operations](operations.md#retention-and-restart).
 
 ## Scheduler
 
@@ -135,15 +149,17 @@ bounded due-work processing; none is needed in a minimal example.
 | `reconcile_interval` | duration | `30s` | Maintenance cadence, at least poll interval and at most 1h |
 
 Durable-specific validation runs when durable mode is enabled. The HTTP write
-timeout is max(15s, operation timeout + 1s); header/read/idle timeouts are 5/10/60s.
-These fixed HTTP timeouts have no separate YAML settings.
+timeout is max(15s, operation timeout + 1s); header/read/idle timeouts are
+5/10/60s. These fixed HTTP timeouts have no separate YAML settings.
 
 ## Destinations and authentication
 
-`delivery.sinks` is a list, defaulting to one `{id: default, type: log}` destination.
-Durable modes require 1–32 sinks. Explicit list entries replace the default list.
-All sink IDs must be unique. Define stable destinations before accepting alerts:
-the full set is frozen at first durable acceptance, even with delivery disabled.
+`delivery.sinks` is a list, defaulting to one `{id: default, type: log}`
+destination. Durable modes require 1–32 sinks. Explicit list entries replace
+the default list. All sink IDs must be unique. Define stable destinations
+before accepting alerts: the full set is frozen at first durable acceptance,
+even with delivery disabled. Enabling delivery later does not retroactively
+add destinations to old occurrences.
 
 | Key under `delivery.sinks[]` | Type | Default | Purpose / constraints | Level |
 |---|---|---|---|---|
@@ -156,33 +172,36 @@ the full set is frozen at first durable acceptance, even with delivery disabled.
 | `http.basic_auth.password` | string | absent | Literal or exact `${NAME}`; provide with username | Common when authenticated |
 | `http.idempotency_key` | boolean | `true` | Send stable intent ID in Idempotency-Key; destination deduplication is not assumed | Advanced |
 
-Both auth fields may be absent for an unauthenticated destination. Otherwise each
-must resolve nonempty when delivery is enabled. Username cannot contain colon or
-CR/LF; password cannot contain CR/LF. Literal and environment values can be mixed.
-Only whole-value `${NAME}` interpolation is supported, once, in these two fields;
-`prefix${NAME}` and malformed references are rejected. Other YAML fields are not
-expanded. Valkey `password_env` instead takes a bare variable name.
+Both auth fields may be absent for an unauthenticated destination. Otherwise
+each must resolve nonempty when delivery is enabled. Username cannot contain
+colon or CR/LF; password cannot contain CR/LF. Literal and environment values
+can be mixed. Only whole-value `${NAME}` interpolation is supported, once, in
+these two fields; `prefix${NAME}` and malformed references are rejected. Other
+YAML fields are not expanded. Valkey `password_env` instead takes a bare
+variable name.
 
-Use HTTPS for remote Basic Authentication. TLS verifies system roots; no custom CA,
-insecure-skip, client certificate, arbitrary header or per-alert URL setting exists.
-Redirects are rejected. HTTP transport can use trusted process proxy environment
-settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) through Go's default transport;
-these are not YAML options. Loopback destinations bypass the standard proxy lookup.
-Protect configured endpoints, credentials, Valkey payloads and outbound connectivity.
-Inbound listener security is configured separately through the shared environment
-variables above; it does not change outbound destination identity.
+Use HTTPS for remote Basic Authentication. TLS verifies system roots; no custom
+CA, insecure-skip, client certificate, arbitrary header or per-alert URL
+setting exists. Redirects are rejected. HTTP transport can use trusted process
+proxy environment settings (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`) through Go's
+default transport; these are not YAML options. Loopback destinations bypass
+the standard proxy lookup. Protect configured endpoints, credentials, Valkey
+payloads and outbound connectivity. Inbound listener security is configured
+separately through the shared environment variables above; it does not change
+outbound destination identity.
 
-The destination registry includes type, URL/query, timeout, authentication
-references/modes and idempotency setting. Changing/removing registered destinations
-is rejected even with a higher epoch. Credential **values** may rotate on restart;
+**Registered destination identity is immutable.** The destination registry
+includes type, URL/query, timeout, authentication references/modes and
+idempotency setting. Changing/removing registered destinations is rejected
+even with a higher epoch. Credential **values** may rotate on restart;
 changes to auth reference names or modes change identity. See
 [safe changes](operations.md#change-policies-and-destinations).
 
 ## Dispatcher and retries
 
-All keys below are under `delivery.dispatcher`; validation of these shared tuning
-settings applies when delivery is enabled. HTTP sink timeout validation applies
-even when delivery is disabled.
+All keys below are under `delivery.dispatcher`; validation of these shared
+tuning settings applies when delivery is enabled. HTTP sink timeout validation
+applies even when delivery is disabled.
 
 | Key | Type | Default | Change when / constraints |
 |---|---|---|---|
@@ -194,11 +213,17 @@ even when delivery is disabled.
 | `retry_initial` | duration | `5s` | Initial retry backoff, at least poll interval |
 | `retry_max` | duration | `5m` | At least initial backoff, at most 1h |
 
-The default lease covers 10s delivery + 3 × 5s state-store budgets. Retry-After may
-extend an individual retry deadline up to the separately bounded hint; this does
-not change retry_max. No retry-attempt limit, redrive endpoint or sink retirement
-setting exists. See [retry behavior](operations.md#delivery-ordering-and-retries).
+Webhook acceptance, external sink success and committed action receipts are
+separate events. Resolution delivery to a sink requires that sink's firing
+receipt. A sink operation may be repeated if the receipt commit fails; delivery
+is at least once, not exactly once.
 
-`durable.sink_id` and `delivery.sink` are obsolete and rejected. Stored occurrence
-format is 2; no legacy schema migration is provided. See
+The default lease covers 10s delivery + 3 × 5s state-store budgets.
+`Retry-After` may extend an individual retry deadline up to the separately
+bounded hint; this does not change `retry_max`. No retry-attempt limit,
+redrive endpoint or sink retirement setting exists. See
+[retry behavior](operations.md#delivery-ordering-and-retries).
+
+`durable.sink_id` and `delivery.sink` are obsolete and rejected. Stored
+occurrence format is 2; no legacy schema migration is provided. See
 [registry recovery](../redis-debugging.md#incomplete-registry-corruption-and-development-reset).
