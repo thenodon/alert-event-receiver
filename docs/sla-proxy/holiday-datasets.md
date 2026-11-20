@@ -1,9 +1,28 @@
 # Use offline holiday datasets
 
-A policy can read public holidays from an operator-supplied `.ics` file and its
-adjacent `.ics.json` manifest. New countries and subdivisions need data and YAML,
-not Go imports. The Go service never downloads calendars, starts Python, contacts
-a holiday API or reloads files in the background.
+[Getting started](getting-started.md) · [Concepts](concepts.md) · [Configuration](configuration.md) · [Operations](operations.md) · [Reference](reference.md)
+
+A policy can exclude public holidays and other closure dates using an
+operator-supplied `.ics` file and its adjacent `.ics.json` manifest. New
+countries and subdivisions require data and YAML configuration, not Go imports.
+The Go service never downloads calendars, starts Python, contacts a holiday
+API, or reloads files in the background.
+
+## Workflow at a glance
+
+1. **Generate** a normalized ICS file and its checksum-bound manifest offline.
+2. **Review and validate** the generated holiday dates and declared year coverage.
+3. **Install** both files in a new immutable version directory.
+4. **Activate** that directory using an atomic symlink switch, then restart the
+   proxy to load the new snapshot.
+5. **Coordinate durable policy changes**: changed effective dates or coverage
+   require a higher `durable.policy_epoch` and can hold existing bindings.
+
+The manifest establishes file consistency, not the correctness of holiday law.
+A successful restart loads the new dataset; it does **not** migrate existing
+durable occurrences to a new policy version. See
+[install and update safely](#install-and-update-safely) before replacing a
+dataset in a running durable deployment.
 
 ## Configure one policy
 
@@ -25,19 +44,21 @@ sla_definitions:
 ```
 
 `dataset` must be an **absolute local path ending in `.ics`**, pointing to a
-readable regular file. No relative, HTTP or webcal paths are accepted. Symlinks
-are resolved once; the manifest is adjacent to the **resolved file**, named by
-appending `.json`. Policies sharing a canonical path share one immutable loaded
-set. Different policies can select different files without a global registry.
+readable regular file. Relative paths, HTTP URLs and webcal URLs are not
+accepted. Symlinks are resolved once; the manifest is adjacent to the
+**resolved file**, named by appending `.json`. Policies sharing a canonical
+path share one immutable loaded set. Different policies can select different
+files without a global registry.
 
-The former YAML `country` and `subdivision` fields are no longer supported. Use
-`dataset` for public holidays, or `additional_dates` for explicit closures. The
-manifest's country/subdivision fields are informational. The file must already
-contain all applicable holidays; a Bavaria dataset needs nationwide and statewide
-Bavarian dates together. Municipality-specific or company closures require suitable
-data or explicit additional_dates. The service does not infer regional law.
+The former YAML `country` and `subdivision` fields are no longer supported.
+Use `dataset` for public holidays and `additional_dates` for explicit
+closures. The manifest's country/subdivision fields are informational.
+The file must already contain all applicable holidays: a Bavaria dataset,
+for example, must include both nationwide and statewide Bavarian dates.
+Municipality-specific or company closures require suitable data or explicit
+`additional_dates`. The service does not infer regional law.
 
-Explicit additions keep the `additional_date` reason before `holiday`, within
+Explicit additions take the `additional_date` reason before `holiday`, within
 valid dataset coverage. Dates are local civil dates in the policy's time zone,
 including the local date of an overnight carry; no UTC conversion is applied.
 
@@ -48,7 +69,8 @@ tooling in a separate environment. Nothing here is required by the Go binary:
 
 ```bash
 python3 -m venv /tmp/sla-holiday-tools
-/tmp/sla-holiday-tools/bin/python -m pip install -r tools/holidays/requirements.txt
+/tmp/sla-holiday-tools/bin/python -m pip install \
+  -r tools/holidays/requirements.txt
 /tmp/sla-holiday-tools/bin/holidays-ics --help
 ```
 
@@ -58,18 +80,22 @@ and `--output` for an explicit file. For inspection, its direct export syntax is
 
 ```bash
 /tmp/sla-holiday-tools/bin/holidays-ics SE --years 2020-2040 \
-  --categories public --language en_US --output /tmp/holidays_se.raw.ics
+  --categories public --language en_US \
+  --output /tmp/holidays_se.raw.ics
+
 /tmp/sla-holiday-tools/bin/holidays-ics DE --subdiv BY --years 2020-2040 \
-  --categories public --language en_US --output /tmp/holidays_de_by.raw.ics
+  --categories public --language en_US \
+  --output /tmp/holidays_de_by.raw.ics
 ```
 
-Raw exporter files use `DURATION`, so **do not install them directly**. The helper
-uses the pinned Python iCalendar parser to normalize grouped durations into
-explicit one-day DTSTART/DTEND events, validates dates against the provider API,
-and computes the manifest. It rejects years outside the selected provider's
-advertised support rather than declaring missing years holiday-free. The exporter
-and provider remain the source of holiday correctness; review legal/observance
-changes and subdivision coverage for your deployment.
+Raw exporter files use `DURATION`, so **do not install them directly**.
+The helper uses the pinned Python iCalendar parser to normalize grouped
+durations into explicit one-day `DTSTART`/`DTEND` events, validates dates
+against the provider API, and computes the manifest. It rejects years outside
+the selected provider's advertised support rather than declaring missing
+years holiday-free. The exporter and provider remain the source of holiday
+correctness; review legal/observance changes and subdivision coverage for
+your deployment.
 
 Generate a new version directory; an existing directory is never overwritten:
 
@@ -77,26 +103,30 @@ Generate a new version directory; an existing directory is never overwritten:
 /tmp/sla-holiday-tools/bin/python tools/holidays/generate.py \
   --country SE --first-year 2020 --last-year 2040 \
   --output-dir /tmp/sla-holidays-se-v1 --name holidays_se.ics
+
 /tmp/sla-holiday-tools/bin/python tools/holidays/generate.py \
   --country DE --subdivision BY --first-year 2020 --last-year 2040 \
   --output-dir /tmp/sla-holidays-de-by-v1 --name holidays_de_by.ics
 ```
 
-Each result contains the normalized `.ics` and adjacent manifest. The helper pins
-`holidays==0.108` and `icalendar==7.3.0`; all offline dependencies are pinned in
-[requirements](../../tools/holidays/requirements.txt). It removes volatile export
-timestamps, deduplicates dates and uses stable metadata, making repeated exports
-byte-reproducible with the same dependency versions. Names are not exclusion rules.
-The API's observed dates outside the requested years are clipped to declared years.
+Each result contains the normalized `.ics` and adjacent manifest. The helper
+pins `holidays==0.108` and `icalendar==7.3.0`; all offline dependencies are
+pinned in [requirements](../../tools/holidays/requirements.txt). It removes
+volatile export timestamps, deduplicates dates and uses stable metadata,
+making repeated exports byte-reproducible with the same dependency versions.
+Names are not exclusion rules. The API's observed dates outside the requested
+years are clipped to declared years.
 
 The [checked-in fixtures](../../internal/slaproxy/testdata/holidays/README.md)
-were generated by this workflow. Other data sources are allowed if their output
-satisfies the same profile and trustworthy coverage contract.
+were generated by this workflow. Other data sources are allowed if their
+output satisfies the same profile and trustworthy coverage contract.
 
 ## Manifest and accepted ICS profile
 
-A strict UTF-8 JSON manifest is mandatory. Example structure (the digest must
-match the actual bytes, not the placeholder):
+### Manifest
+
+A strict UTF-8 JSON manifest is mandatory. Example structure (the digest
+must match the actual bytes, not the placeholder):
 
 ```json
 {
@@ -112,99 +142,141 @@ match the actual bytes, not the placeholder):
 }
 ```
 
-Years are inclusive and between 1 and 9999. Provenance source/version are required;
-country/subdivision do not select application rules. Unknown/duplicate fields,
-non-scalar/null values, unsupported schema/format, invalid years, trailing JSON and
-checksum mismatch fail startup. SHA-256 verifies consistency, not the authenticity
-or completeness of operator-supplied data. Never infer coverage from event extrema.
-A covered year may legitimately contain no events, but the dataset as a whole
-must contain at least one event.
+Years are inclusive and between 1 and 9999. Provenance source/version are
+required; country/subdivision do not select application rules.
+Unknown/duplicate fields, non-scalar/null values, unsupported schema/format,
+invalid years, trailing JSON and checksum mismatch fail startup.
+
+SHA-256 verifies consistency, **not authenticity or completeness** of
+operator-supplied data. Never infer coverage from event extrema. A covered
+year may legitimately contain no events, but the dataset as a whole must
+contain at least one event.
+
+### Supported ICS profile
 
 The supported profile is deliberately smaller than general iCalendar:
 
 - Exactly one complete `VCALENDAR`, `VERSION:2.0`, and at least one `VEVENT`.
 - Every holiday has `DTSTART;VALUE=DATE:YYYYMMDD`; optional
-  `DTEND;VALUE=DATE` is exclusive. Without DTEND it is one civil day.
+  `DTEND;VALUE=DATE` is exclusive. Without `DTEND` it is one civil day.
 - Multi-day ranges are expanded to civil dates and duplicate dates deduplicated.
-- Folded lines and ordinary escaped text are parsed by the ICS library. Event
-  names, descriptions, UID and timestamp metadata do not determine exclusions.
-- `DURATION`, `RRULE`, `RDATE`, `EXDATE`, `EXRULE`, `RECURRENCE-ID`, date-time values,
-  TZID date parameters, cancelled events, non-Gregorian scales and nested/non-event
-  components are rejected. Export explicit dates instead of relying on recurrence.
+- Folded lines and ordinary escaped text are parsed by the ICS library.
+  Event names, descriptions, UID and timestamp metadata do not determine exclusions.
+- `DURATION`, `RRULE`, `RDATE`, `EXDATE`, `EXRULE`, `RECURRENCE-ID`,
+  date-time values, TZID date parameters, cancelled events, non-Gregorian
+  scales and nested/non-event components are rejected. Export explicit dates
+  instead of relying on recurrence.
 - Events outside declared coverage, zero/backward ranges and malformed syntax fail.
-- Limits: ICS 8 MiB, manifest 64 KiB, 100,000 events, 64 KiB per unfolded line,
-  3,660 days per event, and 200,000 total expanded dates **including duplicates**.
-  Only calendar → event nesting is accepted. Files must be regular, not devices,
-  directories or FIFOs. These are defensive limits, not recommended dataset sizes.
+- Limits: ICS 8 MiB, manifest 64 KiB, 100,000 events, 64 KiB per unfolded
+  line, 3,660 days per event, and 200,000 total expanded dates **including
+  duplicates**. Only calendar → event nesting is accepted. Files must be
+  regular, not devices, directories or FIFOs. These are defensive limits,
+  not recommended dataset sizes.
 
 ## Coverage and readiness
 
 At startup, every dataset must cover **yesterday through today +
-`evaluation_horizon_days` + 3 days**, inclusive, using each policy's local date.
-The extra boundary allowance covers civil-date boundaries. This is a defined
-operational window, not a promise of arbitrary historical or infinite coverage.
+`evaluation_horizon_days` + 3 days**, inclusive, using each policy's local
+date. The extra boundary allowance covers civil-date boundaries. This is a
+defined operational window, not a promise of arbitrary historical or
+infinite coverage.
 
-`/readyz` checks the same rolling window. It returns 503 when refreshing data is
-needed, including before the last covered year actually ends. `/healthz` remains
-liveness only. Every local date examined by calendar evaluation is coverage-checked,
-even an unscheduled weekday or an explicit additional date. An uncovered date
-produces `calendar_error`; it is never counted as an ordinary non-holiday.
+`/readyz` checks the same rolling window. It returns HTTP 503 when refreshing
+data is needed, including before the last covered year actually ends.
+`/healthz` remains liveness only. Every local date examined by calendar
+evaluation is coverage-checked, even an unscheduled weekday or an explicit
+additional date. An uncovered date produces `calendar_error`; it is never
+counted as an ordinary non-holiday.
 
-Readiness failure does not discard work or revoke external sends. Covered historical
-requests can still be processed; saved decisions/receipts continue following existing
-durable semantics without inventing new holiday facts. Requests needing an uncovered
-date fail: observe-only returns 500, new durable acceptance returns 503. Known durable
-resolutions still use their retained original decisions. Refresh in advance; there
-is no background reload or automatic epoch bump.
+Readiness failure does not discard work or revoke external sends. Covered
+historical requests can still be processed; saved decisions/receipts continue
+following existing durable semantics without inventing new holiday facts.
+Requests needing an uncovered date fail: observe-only returns HTTP 500,
+new durable acceptance returns HTTP 503. Known durable resolutions still
+use their retained original decisions.
+
+**Refresh before coverage expires.** There is no background reload or
+automatic epoch bump. The rolling readiness requirement is separate from
+the semantic change rules below: even extending coverage without changing
+holiday dates changes the policy identity.
 
 ## Install and update safely
 
-Use immutable version directories on the destination filesystem. Transfer into a
-staging directory, verify the pair, and rename the directory into place. A single
-file rename cannot atomically replace both files; do not overwrite the live pair
-one file at a time. A checksum mismatch fails closed, but is avoidable downtime.
-For a local example, after generation above (run installation with suitable privileges):
+### Install an immutable version
+
+Use immutable version directories on the destination filesystem. Transfer
+into a staging directory, verify the pair, and rename the directory into
+place. A single file rename cannot atomically replace both files; do not
+overwrite the live pair one file at a time. A checksum mismatch fails closed,
+but is avoidable downtime.
+
+For a local example, after generation above (run installation with suitable
+privileges):
 
 ```bash
 install -d /etc/alert-sla-proxy/holiday-data
-cp -a /tmp/sla-holidays-se-v1 /etc/alert-sla-proxy/holiday-data/.se-v1-stage
-mv /etc/alert-sla-proxy/holiday-data/.se-v1-stage /etc/alert-sla-proxy/holiday-data/se-v1
-ln -s se-v1 /etc/alert-sla-proxy/holiday-data/current.new
-mv -Tf /etc/alert-sla-proxy/holiday-data/current.new /etc/alert-sla-proxy/holiday-data/current
+
+cp -a /tmp/sla-holidays-se-v1 \
+  /etc/alert-sla-proxy/holiday-data/.se-v1-stage
+
+mv /etc/alert-sla-proxy/holiday-data/.se-v1-stage \
+  /etc/alert-sla-proxy/holiday-data/se-v1
+
+ln -s se-v1 \
+  /etc/alert-sla-proxy/holiday-data/current.new
+
+mv -Tf /etc/alert-sla-proxy/holiday-data/current.new \
+  /etc/alert-sla-proxy/holiday-data/current
 ```
 
-Choose fresh version/staging names for subsequent installs; `current` is a symlink,
-not an ordinary directory. The symlink rename is atomic on the same filesystem.
-The running service retains its old in-memory snapshot until restarted. Provide
-service-user read access to both files and directory traversal; restrict write
-access to trusted administrators. Symlink and data directories must be trusted.
-Keep old versions and consistent Valkey/configuration backups for rollback.
+Choose fresh version/staging names for subsequent installs; `current` is a
+symlink, not an ordinary directory. The symlink rename is atomic on the
+same filesystem. The running service retains its old in-memory snapshot
+until restarted.
 
-A new effective dataset is a **policy change**. Its semantic identity includes the
-sorted date set, coverage and rule version, not its filename, event ordering,
-summary text or source labels. `additional_dates` remain part of policy identity.
-Consequently:
+Provide service-user read access to both files and directory traversal;
+restrict write access to trusted administrators. Symlink and data directories
+must be trusted. Keep old versions and consistent Valkey/configuration
+backups for rollback.
 
-1. Same dates/coverage with changed bytes require a matching new manifest checksum,
-   but not an epoch change. Moving identical data to a different path is also
-   nonsemantic. Existing processes do not observe that move without restart.
-2. Changed dates **or extended coverage** require a higher `durable.policy_epoch`.
-   Starting at the same epoch is rejected; old instances are fenced after activation.
-3. Affected existing bindings become `policy_changed` holds, preserving original
-   stored calendar decisions, intent IDs and receipts. No automatic reinterpretation,
-   migration or historical sink backfill occurs. Unrelated policies remain unchanged.
-4. To release compatible held work, restore the exact original policy/dataset
-   semantics under a still higher epoch. Restoring files alone cannot lower the
-   active epoch. The old dataset must still meet startup coverage requirements;
-   if it has expired, restoration may not be possible. There is no automatic
-   migration/redrive endpoint. Do not delete records/registries to bypass holds.
+### Determine whether the update changes policy identity
+
+A new effective dataset is a **policy change**. Its semantic identity
+includes the sorted date set, coverage and rule version, not its filename,
+event ordering, summary text or source labels. `additional_dates` remain
+part of policy identity.
+
+| Update | Higher `durable.policy_epoch`? | Effect |
+|---|---|---|
+| New ICS bytes, same effective dates and coverage | No | Install matching manifest; restart to load |
+| Move identical data to a different path | No | Restart to load the new path |
+| Change effective holiday dates | Yes | Affected existing bindings are held |
+| Extend or otherwise change coverage bounds | Yes | Affected existing bindings are held |
+| Restore original semantics after a changed policy was activated | Yes, higher than active epoch | Can release compatible holds if coverage remains sufficient |
+
+For a semantic change, coordinate the higher epoch across replicas.
+Starting the changed policy at the same epoch is rejected; old instances
+are fenced after activation. **Increasing the epoch activates the change;
+it does not migrate or redrive existing work.**
+
+Affected existing bindings become `policy_changed` holds, preserving
+original stored calendar decisions, intent IDs and receipts. No automatic
+reinterpretation, migration or historical sink backfill occurs. Unrelated
+policies remain unchanged.
+
+To release compatible held work, restore the exact original policy/dataset
+semantics under a still higher epoch. Restoring files alone cannot lower the
+active epoch. The old dataset must still meet startup coverage requirements;
+if it has expired, restoration may not be possible. There is no automatic
+migration/redrive endpoint. Do not delete records or registries to bypass holds.
 
 This first iteration deliberately chooses safe holds, not persistent dataset
-snapshots or automatic migration. Plan coverage extensions and long-lived pending
-work operationally. Changing data can hold unresolved work, outstanding authorized
-recovery and resolutions awaiting receipts, under the existing policy-hold rules.
-A previously authorized remote call can still complete during a rollout; at-least-once
-ambiguity and firing-before-resolved ordering are unchanged.
+snapshots or automatic migration. Plan coverage extensions and long-lived
+pending work operationally. Changing data can hold unresolved work,
+outstanding authorized recovery and resolutions awaiting receipts, under
+the existing policy-hold rules. A previously authorized remote call can
+still complete during a rollout; at-least-once ambiguity and
+firing-before-resolved ordering are unchanged.
 
 ## Troubleshoot
 
@@ -219,6 +291,7 @@ ambiguity and firing-before-resolved ordering are unchanged.
 | `policy_changed` after refreshing years | Coverage is semantic. Follow hold/restore guidance; an epoch bump is activation, not migration |
 
 Dataset lookups use `sla_proxy_holiday_evaluations_total{result}` with bounded
-holiday/not_holiday/error results. The former `country` metric label has been
-removed. No path, hash, country or policy name becomes a metric label. Explicit
-additions within coverage bypass dataset lookup counters. See [reference](reference.md).
+`holiday`/`not_holiday`/`error` results. The former `country` metric label has
+been removed. No path, hash, country or policy name becomes a metric label.
+Explicit additions within coverage bypass dataset lookup counters.
+See [reference](reference.md#ics-holiday-datasets).
