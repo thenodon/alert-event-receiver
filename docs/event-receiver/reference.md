@@ -144,7 +144,7 @@ Therefore:
 - **Do not** infer exact loss from differences among generated, submitted and exported counters. Batching, suppression, concurrent scrapes, restarts and partial results affect those comparisons.
 - A later successful shutdown or flush **cannot retroactively recover** a batch whose export finally failed.
 
-See [delivery failure handling](operations.md#understand-processing-and-delivery)
+See [delivery failure handling](operations.md#trace-a-webhook-through-processing-and-delivery)
 for operational interpretation.
 
 ## Closed alert duration histogram
