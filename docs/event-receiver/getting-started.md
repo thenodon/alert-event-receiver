@@ -179,4 +179,4 @@ docker stop aer-valkey aer-victorialogs
 Continue with [concepts](concepts.md) for lifecycle behavior,
 [configuration](configuration.md) for deployment settings,
 [reference](reference.md) for event fields and metrics, or
-[Valkey inspection](../redis-debugging.md) for stored state.
+[Valkey inspection](redis-debugging.md) for stored state.

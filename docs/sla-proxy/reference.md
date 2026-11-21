@@ -364,7 +364,7 @@ persisted receipts.
 
 Enrichment, destination routing rules, sink editing/redrive APIs and downstream
 processing guarantees are not implemented. See [Redis/Valkey
-debugging](../redis-debugging.md#alert-sla-proxy-keys-and-debugging) for
+debugging](redis-debugging.md#namespace-and-key-layout) for
 operational inspection, configuration changes and recovery.
 
 ## ICS holiday datasets

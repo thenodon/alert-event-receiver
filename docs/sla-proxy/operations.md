@@ -103,7 +103,7 @@ Configure persistence, `noeviction`, storage capacity and exclusive schema owner
 
 `durable.policy_epoch` is a positive, operator-controlled activation version for one namespace. Use the same epoch/catalog for normal restarts or concurrent instances. Increase it when activating policy/catalog/delivery-mode changes. A higher epoch fences old instances, so coordinate the rollout across all replicas.
 
-The full authoritative change matrix is in [configuration changes and key deletion](../redis-debugging.md#configuration-changes-and-key-deletion).
+The full authoritative change matrix is in [configuration changes and key deletion](redis-debugging.md#configuration-changes-and-key-deletion).
 
 | Change | Required action and effect |
 |---|---|
@@ -185,7 +185,7 @@ Use [native HTTPS and endpoint Basic Auth](../http-security.md), or a trusted TL
 
 ## Advanced recovery
 
-Keep [Redis/Valkey debugging](../redis-debugging.md) available for key-level investigation and the [fence-first repair procedure](../redis-debugging.md#fence-first-quarantine-repair). Implementation details are in the [current implementation notes](../specifications/sla-proxy-implementation.md).
+Keep [Redis/Valkey debugging](redis-debugging.md) available for key-level investigation and the [fence-first repair procedure](redis-debugging.md#fence-first-quarantine-repair). Implementation details are in the [current implementation notes](../specifications/sla-proxy-implementation.md).
 
 ## Dataset refresh and expiry
 

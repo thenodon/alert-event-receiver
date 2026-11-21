@@ -75,4 +75,4 @@ The receiver provides **best-effort OTLP delivery**. SDK batching and retries us
 
 Lifecycle decisions also use a read/decide/write sequence that is **not atomic across concurrent requests**. Use a single receiver when the documented ordering model matters; running multiple instances does not introduce coordination or fencing.
 
-For failure windows, monitoring and recovery limitations, see [operations](operations.md). For event attributes, HTTP behavior and metrics, see [reference](reference.md). For storage inspection, see [Redis/Valkey debugging](../redis-debugging.md).
+For failure windows, monitoring and recovery limitations, see [operations](operations.md). For event attributes, HTTP behavior and metrics, see [reference](reference.md). For storage inspection, see [Redis/Valkey debugging](redis-debugging.md).

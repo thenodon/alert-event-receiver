@@ -18,7 +18,7 @@ This guide helps identify which stage failed and what can be recovered.
 | HTTP 401 | Check webhook Basic Auth credentials before investigating lifecycle processing |
 | HTTP 500 | Required state/processing operation failed. Other alerts in the batch may already have committed |
 | No event for a repeated alert | Expected: same occurrence/status refreshes state but emits no new transition |
-| Orphan or stale resolution | Compare fingerprint and exact `startsAt` with the latest working state; see [Valkey inspection](../redis-debugging.md) |
+| Orphan or stale resolution | Compare fingerprint and exact `startsAt` with the latest working state; see [Valkey inspection](redis-debugging.md) |
 | Valkey outage | Required operations fail with HTTP 500; receiver startup fails if the initial ping fails |
 | OTLP outage | SDK retries and buffers in memory only; final failures or queue overflow may lose records |
 | Restart | Valkey working state remains; in-memory batches do not. Stored state or idempotency keys may suppress later emission |
@@ -214,7 +214,7 @@ guarantee**.
 There is no supported manual replay or durable outbox repair procedure.
 Do **not** delete Valkey state or idempotency keys as a delivery-replay
 workaround: doing so can create duplicate or misclassified transitions.
-See [Valkey debugging](../redis-debugging.md) for inspection and idempotency
+See [Valkey debugging](redis-debugging.md) for inspection and idempotency
 troubleshooting.
 
 ## Change configuration safely
@@ -226,7 +226,7 @@ state domain unless the data is preserved.
 
 Protect labels, annotations, OTLP headers and Valkey credentials. For exact
 key formats, TTL investigation and step-by-step diagnostics, use
-[Redis/Valkey debugging](../redis-debugging.md).
+[Redis/Valkey debugging](redis-debugging.md).
 
 ## Secure webhook and metrics access
 

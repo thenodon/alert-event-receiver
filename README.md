@@ -93,8 +93,8 @@ complete annotated configuration reference.
 | Understand behavior | [Lifecycle concepts](docs/event-receiver/concepts.md) | [Policies and delivery concepts](docs/sla-proxy/concepts.md) |
 | Operate and troubleshoot | [Operations](docs/event-receiver/operations.md) | [Operations](docs/sla-proxy/operations.md) |
 | Inspect contracts and metrics | [Reference](docs/event-receiver/reference.md) | [Reference](docs/sla-proxy/reference.md) |
+| Inspect Valkey state | [Receiver Redis/Valkey debugging](docs/event-receiver/redis-debugging.md) | [SLA proxy Redis/Valkey debugging and recovery](docs/sla-proxy/redis-debugging.md) |
 
-[Redis/Valkey inspection and recovery](docs/redis-debugging.md) ·
 [Load testing with alertload](docs/alertload.md) ·
 [Development and tests](docs/development.md) ·
 [Design and implementation history](docs/specifications/README.md)

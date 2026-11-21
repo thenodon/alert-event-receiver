@@ -244,4 +244,4 @@ docker stop sla-demo-valkey
 ```
 
 Continue with [concepts](concepts.md), [configuration](configuration.md),
-[reference](reference.md) and [Valkey debugging](../redis-debugging.md).
+[reference](reference.md) and [Valkey debugging](redis-debugging.md).
