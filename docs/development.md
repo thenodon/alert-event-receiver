@@ -1,12 +1,22 @@
 # Development and documentation maintenance
 
-User documentation starts at the [documentation index](README.md).
-[Specifications](specifications/README.md) preserve design decisions, implementation
-history and benchmark reports; they are not deployment prerequisites.
+[Documentation index](README.md) · [Specifications and implementation history](specifications/README.md)
 
-## Build
+This guide covers source builds, tests, documentation checks and repository
+maintenance. Commands run from the **repository root** unless stated otherwise.
+Specifications preserve design decisions, historical implementation details and
+benchmarks; they are not deployment prerequisites.
 
-Run from the repository root with Go 1.26.11+ (the version pinned in CI and images):
+## Build the executables
+
+Use **Go 1.26.11 or newer**, matching the version pinned in CI and images.
+
+| Executable | Source |
+|---|---|
+| `alert_event_receiver` | `cmd/server` |
+| `alert-sla-proxy` | `cmd/alert-sla-proxy` |
+| `alertload` | `cmd/alertload` |
+| `httpsink-mock` | `cmd/httpsink-mock` |
 
 ```bash
 go build -o /tmp/alert_event_receiver ./cmd/server
@@ -15,22 +25,29 @@ go build -o /tmp/alertload ./cmd/alertload
 go build -o /tmp/httpsink-mock ./cmd/httpsink-mock
 ```
 
-`-version` prints the injected version, or `unknown` when not set. The two services
-use independent `main.version` variables. A source build can inject a version:
+`-version` prints the injected version, or `unknown` if no version was
+injected. The two services have separate `main.version` variables.
+For example:
 
 ```bash
-go build -ldflags '-X main.version=documentation-test'   -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
+go build -ldflags '-X main.version=documentation-test' \
+  -o /tmp/alert-sla-proxy ./cmd/alert-sla-proxy
 /tmp/alert-sla-proxy -version
 ```
 
-The current Dockerfile and release artifact build only the receiver. Do not assume
-an SLA proxy image or release artifact exists. The Dockerfile's `EXPOSE 8080` does
-not change the receiver default listener `:9011`; map the actual listener. The
-release workflow's linker target differs from `main.version`; verify release
-version output rather than assuming it was injected. These packaging issues are
-outside the documentation restructure and application source is unchanged.
+### Packaging limitations
 
-## Tests and checks
+The current Dockerfile and release artifact build **only the event
+receiver**. Do not assume a published SLA proxy image or release
+artifact exists. The Dockerfile's `EXPOSE 8080` does not change the
+receiver's default listener `:9011`; map the actual listener.
+
+The release workflow uses a linker target different from `main.version`.
+Verify the version reported by a release binary rather than assuming
+it was injected. These are packaging limitations; documentation changes
+do not alter application source or release behavior.
+
+## Run tests and static checks
 
 ```bash
 go test ./...
@@ -39,26 +56,33 @@ go vet ./...
 govulncheck ./...
 ```
 
-`govulncheck` is an external tool installed by CI; it may not be installed locally.
-For broader race coverage use `go test -race ./...`.
+`govulncheck` is installed in CI but may need to be installed locally.
+For broader race detection, run `go test -race ./...`.
 
-Real-Valkey SLA integration tests require native `valkey-server` on PATH, or
-`SLA_PROXY_VALKEY_SERVER` set to an executable path:
+### Real-Valkey SLA integration tests
+
+These tests require `valkey-server` on `PATH`, or
+`SLA_PROXY_VALKEY_SERVER` pointing to its executable:
 
 ```bash
 go test -tags=integration ./internal/slaproxy/...
-# Optional additional concurrency validation:
 go test -race -tags=integration ./internal/slaproxy/...
 ```
 
-Fixtures launch their own loopback servers and temporary AOF directories with
-appendfsync always; scripting is denied. They never use an existing user database.
-A missing executable fails tests rather than skipping them. Network/filesystem
-sandboxes may require permission for local listeners and child processes.
-Receiver telemetry integration tests use local HTTP/gRPC fixtures rather than a
-real log backend. Backend query visibility is a separate manual validation.
+The second command adds optional concurrency validation. Test fixtures
+launch their own loopback Valkey servers with temporary AOF directories
+(`appendfsync always`) and deny scripting. They do **not** use an
+existing user database. A missing Valkey executable causes test
+failure rather than a skip. Restricted sandboxes may need permission
+to bind local listeners and launch child processes.
 
-## Documentation validation
+Receiver telemetry integration tests use local HTTP/gRPC fixtures,
+not a real log backend. Backend query visibility requires separate
+manual validation; see [alertload verification](alertload.md#optional-victorialogs-visibility-check).
+
+## Validate documentation
+
+Run after changing Markdown, examples or documentation helpers:
 
 ```bash
 python3 docs/validate.py
@@ -66,79 +90,113 @@ python3 docs/validate.py --examples
 git diff --check
 ```
 
-The first checks local Markdown links/anchors, fenced JSON and shell syntax, and
-syntax of documentation Python helpers. It does not fetch external links or run
-shell examples. `--examples` additionally runs a temporary Go test through an
-overlay to call the actual SLA configuration loader and calendar validator for
-**every YAML example**, plus the alertload profile loader for both scenario files.
-The temporary test source lives outside the checkout; no application/test source
-is edited. This check initializes no sinks or Valkey state and needs no credentials.
+| Check | What it verifies |
+|---|---|
+| `docs/validate.py` | Local Markdown links and heading anchors; fenced JSON and shell syntax; syntax of documentation Python helpers |
+| `docs/validate.py --examples` | Above checks plus temporary Go overlay tests against every SLA YAML example and both alertload scenario files |
+| `git diff --check` | Whitespace errors in the working-tree diff |
 
-Use the configuration references as the canonical source of option explanations.
-Keep minimal examples small, keep complete annotations in the full example, and
-update focused example tests/validation when file locations change. Historical
-specifications describe their own stage; update notices and links, not their
-recorded decisions, when current behavior moves on.
+The basic validator does **not** fetch external links or execute shell
+examples. The examples check invokes the real SLA configuration
+loader and calendar validator, plus the alertload profile loader.
+It writes temporary Go test sources **outside** the checkout and
+does not edit application or test source. It initializes no sinks
+or Valkey state and requires no credentials.
+
+### Documentation conventions
+
+- Use the [event receiver configuration reference](event-receiver/configuration.md)
+  and [SLA proxy configuration reference](sla-proxy/configuration.md) as the
+  canonical explanations of options.
+- Keep minimal examples small and put complete annotations in the
+  [full SLA example](examples/alert-sla-proxy.yaml).
+- When moving files or renaming headings, update incoming links and
+  run the anchor validator.
+- Update focused example tests and validation when examples move.
+- Preserve historical specifications as records of their stage:
+  update notices or links when current behavior changes, rather
+  than silently rewriting earlier design decisions.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
 | `cmd/server` | Event receiver executable |
-| `cmd/alert-sla-proxy` | Independent SLA executable |
+| `cmd/alert-sla-proxy` | Independent SLA proxy executable |
 | `cmd/alertload` | Webhook load generator |
-| `cmd/httpsink-mock` | Local HTTP test destination; prints full webhook payloads |
+| `cmd/httpsink-mock` | Local HTTP destination that prints full webhook payloads |
 | `internal/models` | Shared Alertmanager wire types and lifecycle event model |
-| `internal/processor`, `internal/state`, `internal/webhook` | Receiver lifecycle, working state and handler |
+| `internal/processor`, `internal/state`, `internal/webhook` | Receiver lifecycle, working state and webhook handler |
 | `internal/telemetry` | Receiver OTLP, SDK diagnostics and metrics |
-| `internal/slaproxy` | Independent calendar, durable state, dispatcher and HTTP service |
+| `internal/slaproxy` | Calendar, durable state, dispatcher and SLA HTTP service |
 | `internal/alertload` | Deterministic generator, bounded scheduler and verification |
-| `grafana` | Existing dashboard artifacts |
-| `docs/specifications`, `docs/benchmarks` | Designs and supporting measurements |
+| `grafana` | Dashboard artifacts |
+| `docs/specifications`, `docs/benchmarks` | Designs and measurements |
 
-The SLA proxy reuses wire types and general libraries, not the receiver processor,
-state store or OTLP telemetry as its delivery engine. Preserve separate semantics.
+The SLA proxy reuses wire types and general libraries, **not** the
+receiver's processor, state store or OTLP telemetry as its delivery
+engine. The applications have separate operational semantics.
 
-## ICS dependency and offline dataset tooling
+## Offline holiday dataset development
 
-The Go service pins `github.com/arran4/golang-ical v0.3.8`, Apache-2.0
-([license](https://github.com/arran4/golang-ical/blob/v0.3.8/LICENSE),
-[release history](https://github.com/arran4/golang-ical/releases)). It is an existing
-parser with tagged 2026 maintenance releases and parser/fuzz tests. It has no
-additional production dependencies beyond the Go standard library. The project
-is pre-1.0 and advertises a search for a co-maintainer: pinned versions and review
-of future upgrades remain necessary; this is not an assurance of vulnerability-free
-parsing. A module `govulncheck ./...` check during implementation found no reported
-vulnerabilities. Recheck when upgrading.
+For deployment and supported calendar formats, start with
+[holiday datasets](sla-proxy/holiday-datasets.md). This section
+documents the Go parser dependency, its restrictions and the
+optional offline dataset tooling.
 
-Only reader-based parsing is used. No URL loader, recurrence engine, attachment
-fetch, serializer or parser recovery/skip option is invoked. Application guards
-bound bytes, unfolded lines, component envelope, events and expansion before or
-around parsing. The envelope guard also rejects truncated calendars because the
-upstream calendar-level EOF behavior does not require a closing marker. All-day
-property validation and civil-day expansion implement the documented restricted
-profile; the library still handles RFC content lines/folding/property syntax.
-See [accepted profile](sla-proxy/holiday-datasets.md#manifest-and-accepted-ics-profile).
+### Go ICS parser and accepted input
 
-The former country adapter, `HolidayProvider` interface and `rickar/cal` dependency
-have been removed. Public holidays use ICS datasets only.
-Dataset snapshots belong to compiled policies and are reused by canonical path.
-Semantic hashes contain sorted dates, coverage and a rule version. Policy hashes
-use normalized configuration and dataset semantics; unrelated policies do not
-acquire a new version when another file changes. The durable store schema and
-action/occurrence/sink identities are unchanged. Dataset changes use existing epoch fences and
-policy holds, not a new snapshot store or automatic migration.
+The service pins `github.com/arran4/golang-ical v0.3.8`
+(Apache-2.0; [license](https://github.com/arran4/golang-ical/blob/v0.3.8/LICENSE),
+[release history](https://github.com/arran4/golang-ical/releases)).
+The parser has tagged 2026 maintenance releases and parser/fuzz tests,
+and adds no production dependencies beyond the Go standard library.
+It is pre-1.0 and seeks a co-maintainer. Keep versions pinned and
+review upgrades; maintenance history does not guarantee freedom
+from vulnerabilities. An implementation-time `govulncheck ./...`
+reported none; rerun it for upgrades.
 
-`tools/holidays/requirements.txt` pins the optional offline exporter environment.
-Verify the installed `holidays-ics --help` after dependency changes. Run:
+Only **reader-based parsing** is used. The application does not invoke
+URL loading, recurrence, attachment fetching, serialization or
+parser recovery/skip options. Its guards bound bytes, unfolded lines,
+component envelopes, event counts and expansion. The envelope guard
+rejects truncated calendars even though the upstream calendar-level
+EOF behavior does not require a closing marker.
+
+The library handles RFC content lines, folding and property syntax.
+The application implements restricted all-day property validation
+and civil-day expansion. See the
+[accepted ICS profile](sla-proxy/holiday-datasets.md#manifest-and-accepted-ics-profile).
+
+### Dataset identity and policy changes
+
+The old country adapter, `HolidayProvider` interface and `rickar/cal`
+dependency have been removed. Public holidays use **ICS datasets
+only**. Compiled policies hold dataset snapshots reused by canonical
+path. Semantic hashes include sorted dates, coverage and a rule
+version. Policy hashes use normalized configuration and dataset
+semantics; an unrelated policy does not change version when another
+file changes.
+
+The durable store schema and action/occurrence/sink identities remain
+unchanged. Dataset changes use existing epoch fences and policy holds,
+not a separate snapshot store or automatic migration.
+
+### Test and generate datasets offline
+
+`tools/holidays/requirements.txt` pins the optional offline exporter
+environment. After dependency changes, verify `holidays-ics --help`.
 
 ```bash
 /tmp/sla-holiday-tools/bin/python -B -m unittest discover -s tools/holidays -v
 go test -tags=integration ./internal/slaproxy -run '^TestDataset' -count=1
 ```
 
-The [generator guide](../tools/holidays/README.md) covers provenance and normalized
-explicit-date fixtures. These tests/tools do not add Python to the running Go
-service or ordinary Go test requirements. `docs/validate.py --examples` maps the
-example-only `/etc/alert-sla-proxy/example-holidays/` prefix to checked-in fixtures
-inside its temporary Go overlay test; it does not rewrite production configuration.
+The [generator guide](../tools/holidays/README.md) documents
+provenance and normalized explicit-date fixtures. Python is not a
+runtime requirement of the Go service or ordinary Go tests.
+
+For examples, `docs/validate.py --examples` maps the example-only
+`/etc/alert-sla-proxy/example-holidays/` prefix to checked-in
+fixtures within a temporary Go overlay test. It does **not** modify
+production configuration.
