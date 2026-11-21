@@ -46,7 +46,7 @@ Start with `/readyz`, response counts and `webhook observation` logs. Inspect `m
 | Horizon hold | Bounded calendar search found no opportunity; never treat it as permanent ineligibility |
 | Receipt missing after HTTP success | Receipt commit failed or is ambiguous; duplicate recovery is possible |
 | Ready check fails after rollout | Compare active policy epoch/catalog and schema readiness; old instances cannot keep committing |
-| Incomplete registry / quarantine | Follow [advanced recovery](../redis-debugging.md#incomplete-registry-corruption-and-development-reset); do not delete control keys |
+| Incomplete registry / quarantine | Follow [advanced recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset); do not delete control keys |
 
 ## Investigate an occurrence
 
@@ -54,7 +54,7 @@ Use the exact alert occurrence, not just its fingerprint: correlate `fingerprint
 
 Check the occurrence's known lifecycle and each binding's state. An alert can be eligible under the calendar but not authorized, or authorized for one sink while another remains held or retrying. `SLA HTTP request completed` reports external acceptance; receipt-commit logs are separate. Log sink records omit labels and annotations.
 
-Use those IDs with the read-only commands in [Valkey inspection](../redis-debugging.md#read-only-inspection-commands). Inspect `bindings.<binding_id>.intents.firing.receipt` and the resolved receipt. Pending delivery, eligibility, intent readiness and claims are **not** receipts. In particular, a resolution can be delivered to a sink only after that sink has a successful firing receipt, even if the SLA window has closed.
+Use those IDs with the read-only commands in [Valkey inspection](redis-debugging.md#read-only-inspection). Inspect `bindings.<binding_id>.intents.firing.receipt` and the resolved receipt. Pending delivery, eligibility, intent readiness and claims are **not** receipts. In particular, a resolution can be delivered to a sink only after that sink has a successful firing receipt, even if the SLA window has closed.
 
 Occurrence JSON contains sensitive original payload data; restrict its output. Do not change Valkey keys while investigating.
 

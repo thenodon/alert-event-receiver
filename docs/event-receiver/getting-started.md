@@ -150,7 +150,7 @@ not that the event is persisted in VictoriaLogs. The receiver can generate
 an event and submit it to the OpenTelemetry SDK without the exporter
 succeeding. Exporter success, in turn, does not prove final backend
 persistence. Query results establish current visibility only. See
-[delivery semantics](operations.md#delivery-semantics-and-failure-handling).
+[delivery semantics](operations.md#trace-a-webhook-through-processing-and-delivery).
 
 ## Common problems
 

@@ -102,7 +102,7 @@ Interpret the counters by stage. A difference between generated and submitted
 events can reflect idempotency suppression. A difference between submission and
 export metrics is **not** an exact loss count: batching, partial failures,
 concurrent scrapes and restarts affect comparisons. See the full
-[metrics reference](reference.md#metrics).
+[metrics reference](reference.md#prometheus-metrics).
 
 ## SDK diagnostics, batching and shutdown
 

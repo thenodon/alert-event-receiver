@@ -226,4 +226,4 @@ redrive endpoint or sink retirement setting exists. See
 
 `durable.sink_id` and `delivery.sink` are obsolete and rejected. Stored
 occurrence format is 2; no legacy schema migration is provided. See
-[registry recovery](../redis-debugging.md#incomplete-registry-corruption-and-development-reset).
+[registry recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset).
