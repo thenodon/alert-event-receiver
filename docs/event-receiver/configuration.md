@@ -1,14 +1,33 @@
 # Event receiver configuration
 
-[Getting started](getting-started.md) · [Operations](operations.md) · [Reference](reference.md)
+[Getting started](getting-started.md) · [Concepts](concepts.md) · [Operations](operations.md) · [Reference](reference.md)
 
-Configuration is loaded from the process environment at startup. The receiver
-has no YAML loader or reload endpoint. An `.env` file is only a convenience for
-your shell or service manager; the executable does not read it automatically.
-See [event-receiver.env](../examples/event-receiver.env) for a minimal example.
+The event receiver reads configuration from **process environment variables at
+startup**. It has no YAML loader or reload endpoint. An `.env` file is a
+convenience for your shell or service manager; the executable does **not**
+read it automatically. See the minimal
+[event-receiver.env](../examples/event-receiver.env) example.
 
-**Common** settings choose the listener, Valkey and OTLP destination. **Advanced**
-settings tune retention, export, security and resource use. Restart to apply changes.
+Restart the receiver to apply configuration changes.
+
+## Configuration overview
+
+The settings fall into four groups:
+
+| Group | What it controls | Typical use |
+|---|---|---|
+| [Listener and Valkey](#listener-and-valkey) | HTTP listener, working state and retention | Required deployment settings |
+| [Inbound HTTPS and authentication](#inbound-https-and-endpoint-authentication) | Webhook and metrics access | Secure network exposure |
+| [OTLP destination and identity](#otlp-destination-and-identity) | Export protocol, endpoint, credentials and resource identity | Connect to a Collector or log backend |
+| [SDK batching and attribute limits](#sdk-batching-and-attribute-limits) | In-memory queue, export batching and record limits | Advanced performance and reliability tuning |
+
+**Common** settings are those most deployments need to review. **Advanced**
+settings should generally remain at their defaults until there is an
+operational reason to change them.
+
+The receiver's Redis/Valkey configuration and best-effort OTLP export are
+independent of the SLA proxy's durable delivery configuration. Do not assume
+that a similarly named setting has the same behavior in both services.
 
 ## Listener and Valkey
 
@@ -21,20 +40,41 @@ settings tune retention, export, security and resource use. Restart to apply cha
 | `CLOSED_STATE_TTL` | Go duration | `24h` | Closed occurrence tombstone retention; increase for delayed notifications | Advanced |
 | `IDEMPOTENCY_TTL` | Go duration | `168h` | Emission deduplication key retention; increase for late duplicate notifications | Advanced |
 
-Empty values use defaults. **Malformed duration strings silently use defaults.**
-Parsed durations are not checked for positivity by the application; use positive
-values. Changing TTL settings affects newly applied expirations, not existing
-keys. Open firing state has no TTL. The receiver does not expose Valkey username,
-TLS, Sentinel or Cluster settings; do not assume SLA proxy settings apply here.
+### Retention and parsing behavior
 
-The HTTP server has fixed read/write/idle timeouts of 10/15/60 seconds. HTTP drain
-is bounded to 10 seconds and OTel shutdown to 5 seconds. The receiver has no configurable
-request-body size limit; use appropriate network controls/reverse proxy limits.
+Empty values use defaults. **Malformed duration strings silently use defaults.**
+Parsed durations are not checked for positivity by the application; configure
+positive values.
+
+- `CLOSED_STATE_TTL` applies to closed occurrence tombstones. Open firing state
+  has **no TTL**.
+- `IDEMPOTENCY_TTL` controls how long emission-deduplication keys are retained.
+  These keys suppress emission, not lifecycle processing.
+- Changing either TTL affects **newly applied expirations**, not existing keys.
+
+The receiver does not expose Valkey username, TLS, Sentinel or Cluster
+settings. Do not assume SLA proxy settings apply here.
+
+### Fixed HTTP limits
+
+These HTTP server values are fixed rather than environment-configurable:
+
+| Behavior | Limit |
+|---|---|
+| Read timeout | 10 seconds |
+| Write timeout | 15 seconds |
+| Idle timeout | 60 seconds |
+| HTTP shutdown drain | 10 seconds |
+| OpenTelemetry shutdown | 5 seconds |
+
+The receiver has **no configurable request-body size limit**. Apply suitable
+network controls or reverse-proxy limits when exposing the webhook.
 
 ## Inbound HTTPS and endpoint authentication
 
-Both services use the same optional environment variables (strings, empty by
-default). These are not YAML settings:
+The receiver supports optional HTTPS and separate HTTP Basic Authentication
+for the webhook and metrics endpoints. All settings below are strings and
+default to empty. They are environment variables, **not YAML settings**.
 
 | Variable | Purpose |
 |---|---|
@@ -45,17 +85,25 @@ default). These are not YAML settings:
 | `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
 | `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
 
-An entirely empty pair disables that feature; partial/invalid pairs and missing
-referenced passwords fail startup. HTTPS uses the existing listener and port.
-The health route bypasses authentication but still uses the listener protocol.
-The receiver has no readiness route.
-Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
-networks; use HTTPS or an isolated backend behind a trusted TLS proxy. See the
-[shared security reference](../http-security.md) for constraints, examples, CA
-trust, Alertmanager/Prometheus configuration and rotation. Inbound security is
-independent of outbound OTLP, Valkey and HTTP sink security.
+An entirely empty pair disables that feature. Partial or invalid pairs,
+and missing referenced passwords, **fail startup**.
+
+HTTPS uses the existing listener and port. `/healthz` bypasses Basic
+Authentication but still uses HTTPS when TLS is enabled. The event receiver
+has **no `/readyz` endpoint**.
+
+Restart after changing credentials or certificates. Basic Authentication
+over cleartext HTTP is unsafe on untrusted networks; use HTTPS or an
+isolated backend behind a trusted TLS proxy.
+
+See the [shared HTTP security reference](../http-security.md) for
+configuration examples, CA trust, Alertmanager and Prometheus clients,
+and rotation procedures. Inbound security is independent of outbound
+OTLP and Valkey connections.
 
 ## OTLP destination and identity
+
+### Select the protocol and resource identity
 
 | Variable | Type | Default | Use / constraints | Level |
 |---|---|---|---|---|
@@ -63,11 +111,20 @@ independent of outbound OTLP, Valkey and HTTP sink security.
 | `OTEL_SERVICE_NAME` | string | `alert-event-receiver` | Emitted resource service name | Common |
 | `OTEL_RESOURCE_ATTRIBUTES` | comma-separated attributes | empty | Additional resource metadata, e.g. `cluster=dev,tenant=platform` | Common |
 
-The installed OTLP log exporters read the settings below. Every general
-`OTEL_EXPORTER_OTLP_<SUFFIX>` has a log-specific
+Set service attributes consistently: conflicting resource attributes can
+change the identity used for log grouping and queries.
+
+### Configure the OTLP log exporter
+
+The installed OTLP log exporters read the variables below. Each general
+`OTEL_EXPORTER_OTLP_<SUFFIX>` variable has a log-specific
 `OTEL_EXPORTER_OTLP_LOGS_<SUFFIX>` counterpart. Log-specific settings take
-precedence. Select protocol with the general `PROTOCOL` variable above;
-`OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` does not select this application's exporter.
+precedence.
+
+**Important exception:** select the exporter protocol with
+`OTEL_EXPORTER_OTLP_PROTOCOL` above.
+`OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` does **not** select this application's
+exporter.
 
 | Suffix | Type | Default | Purpose / allowed values | Level |
 |---|---|---|---|---|
@@ -75,34 +132,43 @@ precedence. Select protocol with the general `PROTOCOL` variable above;
 | `HEADERS` | `key=value` list | none | Authentication/tenant/backend headers; log-specific nonempty value replaces general headers | Common when required |
 | `TIMEOUT` | integer milliseconds | `10000` | Use a positive timeout; HTTP applies to each request, gRPC to its export/retry operation; malformed integer text uses exporter defaults. Nonpositive values omit the exporter timeout; the batch context still bounds export | Advanced |
 | `COMPRESSION` | enum | none | `gzip`; unset/unsupported values fall back to no compression | Advanced |
-| `INSECURE` | boolean | `false` | Plaintext transport when endpoint scheme does not already determine it; not a skip-certificate-validation switch | Advanced |
+| `INSECURE` | boolean | `false` | Plaintext transport when endpoint scheme does not already determine it; **not** a skip-certificate-validation switch | Advanced |
 | `CERTIFICATE` | file path | system roots | PEM trust certificate(s) for the server | Advanced |
 | `CLIENT_CERTIFICATE` | file path | none | PEM client certificate for mutual TLS; supply with client key | Advanced |
 | `CLIENT_KEY` | file path | none | PEM private key for mutual TLS; protect filesystem permissions | Advanced |
 
-The application parses headers itself: comma segments without `=` continue the
-previous value, supporting values such as `VL-Stream-Fields=a,b,c`. A first segment
-without `key=value` fails initialization. Do not include secrets in shell history
-or shared diagnostic output. Resource attributes can affect resource identity;
-set service attributes consistently rather than defining conflicting values.
+The application parses headers itself: comma-separated segments without `=`
+continue the previous value. This supports header values such as
+`VL-Stream-Fields=a,b,c`. A first segment without `key=value` fails
+initialization.
+
+Do not put credentials in shell history or shared diagnostic output.
+
+### Example: VictoriaLogs over OTLP/HTTP
 
 For a local VictoriaLogs HTTP destination:
 
 ```bash
 export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9428/insert/opentelemetry
+
 # Optional backend stream fields:
 export OTEL_EXPORTER_OTLP_HEADERS='VL-Stream-Fields=service.name,am.external_url,alert.alertname,alert.fingerprint,alert.status,alert.transition'
 ```
 
-Use the endpoint and headers supported by your deployed backend. An OTel
-Collector is optional. A successful export to a Collector does not confirm final
-backend persistence.
+Use the endpoint and headers supported by your deployed backend. An
+OpenTelemetry Collector is optional.
+
+**Exporter success is not proof of final backend persistence.** In
+particular, a successful export to an intermediate Collector only
+establishes acceptance by that exporter destination. See
+[delivery semantics](concepts.md#what-delivery-means).
 
 ## SDK batching and attribute limits
 
-These advanced settings are read by the installed Go Logs SDK (`v1.47.0`);
-exporters are `v0.23.0`. All time settings in this table are milliseconds.
+These are **advanced** settings read by the installed Go Logs SDK
+(`v1.47.0`); exporters are `v0.23.0`. All time settings in the table are
+milliseconds.
 
 | Variable | Type | Default | Change when / constraints |
 |---|---|---|---|
@@ -114,9 +180,17 @@ exporters are `v0.23.0`. All time settings in this table are milliseconds.
 | `OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT` | integer | unlimited | Limit string attribute values; zero allows empty strings only; negative means unlimited; invalid integer text uses default |
 
 SDK environment parsing falls back to defaults for invalid batching values.
-There is no durable queue, delivery guarantee or configurable replay mechanism.
-Increasing queue size or timeouts cannot recover a finally failed export batch.
-The exporter retry policy uses a 60s elapsed budget, 5s initial interval and 30s
-maximum interval; it is also bounded by the batch deadline. These retry-policy
-values are Go API defaults, not additional environment settings exposed here.
-See [failure examples and shutdown](operations.md#sdk-diagnostics-batching-and-shutdown).
+
+### Reliability implications
+
+The queue is **in memory**, not durable. There is no persistent delivery
+queue, delivery guarantee or configurable replay mechanism. Increasing queue
+size or timeouts cannot recover a batch after its final export failure.
+
+The exporter retry policy uses a 60-second elapsed budget, 5-second initial
+interval and 30-second maximum interval; it is also bounded by the batch
+deadline. These retry values are Go API defaults, **not** additional
+environment settings exposed by this application.
+
+For queue-overflow examples, failure behavior and shutdown, see
+[SDK diagnostics and shutdown](operations.md#sdk-diagnostics-batching-and-shutdown).
