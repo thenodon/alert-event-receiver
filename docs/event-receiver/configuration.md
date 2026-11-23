@@ -37,8 +37,8 @@ that a similarly named setting has the same behavior in both services.
 | `REDIS_ADDR` | string | `localhost:6379` | Redis/Valkey address reachable from this process | Common |
 | `REDIS_PASSWORD` | string | empty | Password for the configured server; supply through a secret mechanism | Common when authenticated |
 | `REDIS_DB` | integer | `0` | Database number; invalid integer text fails startup; server/client rejects unsupported database values | Advanced |
-| `CLOSED_STATE_TTL` | Go duration | `24h` | Closed occurrence tombstone retention; increase for delayed notifications | Advanced |
-| `IDEMPOTENCY_TTL` | Go duration | `168h` | Emission deduplication key retention; increase for late duplicate notifications | Advanced |
+| `CLOSED_STATE_TTL` | Go duration | `24h` | Closed occurrence tombstone retention time. This is the time for a closed/resolved alert before its deleted; increase for delayed notifications | Advanced |
+| `IDEMPOTENCY_TTL` | Go duration | `168h` | Avoid emission deduplication to the OTLP destination; increase for late duplicate notifications | Advanced |
 
 ### Retention and parsing behavior
 
@@ -47,13 +47,12 @@ Parsed durations are not checked for positivity by the application; configure
 positive values.
 
 - `CLOSED_STATE_TTL` applies to closed occurrence tombstones. Open firing state
-  has **no TTL**.
-- `IDEMPOTENCY_TTL` controls how long emission-deduplication keys are retained.
-  These keys suppress emission, not lifecycle processing.
+  has **no TTL**. Controlled by valkey key `alertstate:{fingerprint}`
+- `IDEMPOTENCY_TTL` controls how long emission-deduplication keys are retained. This is **not** a replay or delivery 
+  guarantee, since the idempotency key is created before OTEL SDK submission. Controlled by valkey key `alertidemp:{fingerprint}:{startsAt}:{transition}` 
+  where `transition` is `firing` or `resolved`
+  It only suppresses repeated transition emissions to the OTLP destination.
 - Changing either TTL affects **newly applied expirations**, not existing keys.
-
-The receiver does not expose Valkey username, TLS, Sentinel or Cluster
-settings. Do not assume SLA proxy settings apply here.
 
 ### Fixed HTTP limits
 
@@ -193,4 +192,4 @@ deadline. These retry values are Go API defaults, **not** additional
 environment settings exposed by this application.
 
 For queue-overflow examples, failure behavior and shutdown, see
-[SDK diagnostics and shutdown](operations.md#sdk-diagnostics-batching-and-shutdown).
+[SDK diagnostics and shutdown](operations.md#otlp-export-failures-and-shutdown).

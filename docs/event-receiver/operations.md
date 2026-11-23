@@ -41,7 +41,7 @@ validates the **entire batch before changing state**:
   transitions that have already been processed.
 
 Valkey stores lifecycle state and emission-idempotency keys, **not a delivery
-queue**. An idempotency command failure is best effort: it is logged and counted,
+queue**. An idempotency command failure is "best effort": it is logged and counted,
 and emission continues after successful lifecycle state processing. Existing
 idempotency keys suppress emission only; they do not change the detected
 processing outcome.
@@ -104,99 +104,60 @@ export metrics is **not** an exact loss count: batching, partial failures,
 concurrent scrapes and restarts affect comparisons. See the full
 [metrics reference](reference.md#prometheus-metrics).
 
-## SDK diagnostics, batching and shutdown
+## OTLP export failures and shutdown
 
-### Structured diagnostics and redaction
+The event receiver uses the OpenTelemetry Logs SDK to batch and export lifecycle events. Events are buffered **in memory only**; there is no persistent queue or replay mechanism.
 
-Application and SDK failures use structured logs with component, operation and
-best-effort redaction of textual error context. String values, error messages
-and resolved `slog` groups are checked for configured authentication-header
-values, Redis passwords, and credentials/query strings in HTTP URLs.
+### Export failures and buffering
 
-Opaque `slog.KindAny` values—including maps, slices, structs, custom Stringers
-and JSON marshalers—are omitted rather than serialized; their contents are
-not recursively sanitized. `LogValuer` values are resolved and their resulting
-kind is handled by the same rules. Full alert payloads and annotations are
-not deliberately logged.
+When the OTLP destination is unavailable or returns a retryable error, the exporter retries within its configured timeout.
 
-**Redaction is not comprehensive sanitization of arbitrary SDK diagnostics.**
-Unknown secrets, attribute/group names and sensitive text that does not match
-the known patterns may remain visible. Avoid secrets in diagnostic text or
-backend error messages and restrict access to application logs.
+Events can be permanently lost when:
 
-### SDK error reporting and queue overflow
+- The in-memory queue becomes full.
+- An export fails after its retries or timeout are exhausted.
+- The receiver crashes or is forcibly terminated.
+- The receiver shuts down before all pending events are exported.
 
-The SDK global error handler observes diagnostics independently of exporter
-metrics. SDK logging and error-handler configuration are process-global and
-installed once at startup.
+The receiver does not automatically regenerate lost events. Redis/Valkey may already contain the lifecycle state and idempotency key, preventing subsequent notifications from producing the same event again.
 
-Queue-full warnings are routed to structured logs. This implementation has
-**no stable per-event rejection callback or queue-drop Prometheus counter**;
-experimental SDK self-metrics and undocumented internals are not used.
-Queue-overflow warnings are emitted when the SDK next exports or flushes, so
-a crash can prevent even that warning.
+For batching, queue capacity, retry and timeout settings, see [Configuration](configuration.md#sdk-batching-and-attribute-limits).
 
-A queue drop is not counted in `alertreceiver_otlp_export_requests_total`
-unless an `Export` call actually occurs. Nor is it counted in
-`alertreceiver_otel_sdk_errors_total` unless the SDK invokes its error handler.
-In the installed SDK, queue overflow produces a logging warning, **not** an
-error-handler callback. A later export is counted independently of the drop.
-Neither counter is a queue-drop or permanent-loss counter.
+### Monitoring and diagnostics
 
-For queue, batching, timeout, retry and TLS settings, see
-[configuration](configuration.md#sdk-batching-and-attribute-limits). The
-application preserves SDK-managed batching and retry behavior and adds no
-separate retry queue. Export duration includes exporter-managed retries.
+Export failures and SDK warnings are written to structured application logs.
 
-### Failure scenarios and capacity
+The following Prometheus metrics are useful:
 
-**Exporter outage example.** Assume the HTTP OTLP destination responds with
-retryable HTTP 503 errors and no special server-requested delay. A single event
-normally enters an export batch at the next scheduled export, roughly within
-one second when idle. The exporter retries, but the default batch deadline
-ends the export call after roughly **30 seconds**. The SDK then discards that
-failed batch rather than requeueing it. In this example, the event may be held
-for roughly **31 seconds from submission**, not indefinitely until the
-destination recovers. A non-retryable error may discard it much sooner.
+| Metric | Purpose |
+|---|---|
+| `alertreceiver_otlp_export_requests_total` | Successful and failed OTLP export calls |
+| `alertreceiver_otel_sdk_errors_total` | Errors reported through the SDK error handler |
+| `alertreceiver_events_emitted_total` | Events submitted to the SDK, not necessarily exported |
 
-**Queue-capacity example.** If an export is blocked and new lifecycle events
-arrive at **100 records/second**, an initially empty **2,048-record** pending
-queue fills in approximately:
+**These metrics do not provide an exact count of lost events.**
 
-```text
-2048 records / 100 records per second = 20.48 seconds
-```
+In particular, SDK queue overflow produces a warning in the application logs but does not necessarily increment an error counter. A crash may also occur before the warning is written.
 
-Further arrivals displace the oldest queued records, even while the in-flight
-export is retrying. This estimate concerns the pending queue, **excluding**
-the batch already being exported. Actual behavior depends on arrival rate
-and export completion times. Only generated lifecycle events enter the queue,
-not every repeated Alertmanager notification.
+For additional monitoring queries, see [Monitoring examples](#monitoring-examples).
 
-There is no fixed retention duration for queued events. A larger queue can
-delay overflow; longer timeouts can allow longer export attempts. Neither
-makes buffering durable or restores a batch after final export failure.
-A restart loses in-memory records, while retained Valkey state or idempotency
-keys may suppress emission of the lost events on later notifications.
+### Shutdown behavior
 
-### Shutdown and startup failures
+During a normal shutdown, the receiver:
 
-Shutdown follows this sequence:
+1. Allows up to 10 seconds for active HTTP requests to complete.
+2. Closes the Redis/Valkey connection.
+3. Allows up to 5 seconds for the OpenTelemetry SDK to flush pending events and shut down.
 
-1. Allow up to **10 seconds** for HTTP requests to drain.
-2. Close Valkey.
-3. Allow up to **5 seconds** for `LoggerProvider.Shutdown` to flush pending
-   batches and release the exporter.
+Shutdown and export errors are written to structured application logs.
 
-Shutdown uses a fresh, non-cancelled context. Startup failure paths also clean
-up initialized resources. Unexpected HTTP listener failures, including an
-occupied port, are logged and return a nonzero process exit code after cleanup;
-they are not treated as graceful shutdown.
+A successful SDK flush does not guarantee that events have been durably stored in the final log backend.
 
-Timeout, flush and exporter shutdown errors produce structured logs. No
-shutdown-specific metrics are added, and final process counters may not be
-scraped before exit. A successful flush still provides **no query-level
-persistence verification**.
+### Diagnostic log security
+
+Application and SDK diagnostics use structured logging with best-effort redaction of known credentials and sensitive URL components.
+
+Redaction is not guaranteed to remove arbitrary sensitive information. Restrict access to application logs and avoid including secrets in diagnostic messages.
 
 ## Recovery and reliability limits
 

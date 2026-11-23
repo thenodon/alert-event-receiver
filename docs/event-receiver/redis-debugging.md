@@ -9,8 +9,7 @@ the stored keys, read-only inspection, and troubleshooting.
 
 **Do not delete keys to retry OTLP delivery.** Deletion can cause duplicate
 or misclassified transitions, and cannot recover an event lost after a state
-write. The SLA proxy has an independent storage model; see
-[SLA proxy Redis/Valkey debugging](../sla-proxy/redis-debugging.md).
+write. 
 
 ## Key families and occurrence identity
 

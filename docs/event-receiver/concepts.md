@@ -39,9 +39,23 @@ The receiver compares each incoming alert with the latest stored occurrence for 
 | Closed | Newer firing | Reopened | Firing |
 | Closed | Newer resolved | Orphan resolution; replace occurrence | Resolved |
 
-A **processing result** and an **emitted lifecycle event** are different: repeated or stale notifications may be processed without generating another event.
+**New occurrences while an older occurrence is still firing**
 
-A newer firing can supersede an older open occurrence **without synthesizing a resolution** for the old occurrence. The emitted firing event retains `state_write_result=opened`; the processing result distinguishes `SupersededFiring`. A repeated resolution does not refresh the closed tombstone's TTL: the first accepted closure wins.
+If a firing notification arrives with the same fingerprint but a newer `startsAt`, the receiver treats it as a new occurrence of the alert.
+
+The new occurrence replaces the older one in Redis/Valkey, and a new firing lifecycle event is generated. The receiver does not generate a resolved event for the older occurrence because Alertmanager has not reported its resolution.
+
+The processing result in an internal state called `SupersededFiring`, indicating that an older firing occurrence was replaced. The generated firing event has `state_write_result=opened`, indicating that the new occurrence was opened. It can also be observed in metrics as `alertreceiver_processing_outcomes_total{outcome="superseded_firing"}`.
+
+The generated OpenTelemetry lifecycle event contains alert.transition="firing" and alert.state_write_result="opened". The superseded processing outcome is not included in the event.
+
+**Repeated resolutions and Redis/Valkey expiration**
+
+When an occurrence resolves, the receiver stores its state as `closed` and applies the Redis/Valkey key expiration configured by `CLOSED_STATE_TTL`.
+
+If the same resolution notification arrives again, it is recognized as a repeat. The stored state is not changed, no additional resolved lifecycle event is generated, and the key's expiration is not extended.
+
+For example, with `CLOSED_STATE_TTL=24h`, a resolution first processed at 12:00 expires at approximately 12:00 the following day, even if the same resolution is received again later.
 
 ### Batch validation and processing errors
 
