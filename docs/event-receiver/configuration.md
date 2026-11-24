@@ -154,9 +154,13 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:9428/insert/opentelemetry
 # Optional backend stream fields:
 export OTEL_EXPORTER_OTLP_HEADERS='VL-Stream-Fields=service.name,am.external_url,alert.alertname,alert.fingerprint,alert.status,alert.transition'
 ```
+By default, VictoriaLogs uses all OpenTelemetry resource attributes as stream fields. Explicitly selecting stream fields 
+avoids unnecessary stream cardinality while preserving the remaining attributes as searchable log fields.
 
-Use the endpoint and headers supported by your deployed backend. An
-OpenTelemetry Collector is optional.
+Avoid using high-cardinality fields such as alert.fingerprint and event.id as stream fields.
+
+Use the endpoint and headers supported by your deployed backend. An OpenTelemetry Collector is optional. 
+When using a Collector, configure the VictoriaLogs stream fields in its exporter instead.
 
 **Exporter success is not proof of final backend persistence.** In
 particular, a successful export to an intermediate Collector only
