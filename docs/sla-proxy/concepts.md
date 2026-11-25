@@ -1,238 +1,208 @@
 # SLA proxy concepts
 
-The SLA proxy answers two questions: **when is an alert eligible under its SLA calendar, and how does each destination receive firing and resolution notifications in order?** It complements Alertmanager routing, silences and inhibition; it does not replace them or share the event receiver's lifecycle engine.
+The SLA proxy controls when alerts qualify for notification under an SLA calendar and maintains ordered firing and resolution delivery independently for each destination. It complements Alertmanager routing, silences and inhibition; it does not replace them or share the event receiver's lifecycle engine.
 
-Three concepts must remain distinct:
+## Purpose and operating modes
 
-- **Notification evidence:** what an individual webhook establishes about an alert's lifetime.
-- **Durable known state:** the lifecycle inferred from all accepted webhooks. An occurrence remains firing until a resolution is recorded.
-- **Delivery state:** the separate authorization, attempts and receipts maintained for each destination.
-
-## Operating modes
-
-| Mode | Behavior | Meaning of HTTP 200 |
-|---|---|---|
-| **Observe-only** | Validates notifications and reports calendar/lifecycle evidence. No Valkey state, scheduling or sink calls. | Observation completed |
-| **Durable-state-only** | Persists lifecycle, eligibility, scheduling and prepared delivery intents in Valkey. Does not invoke sinks. | Selected state commits accepted, not delivery |
-| **Durable delivery** | Adds an asynchronous dispatcher to deliver prepared work to destinations. | Selected state commits accepted, not delivery |
-
-In durable modes, eligibility and delivery can occur **after** the webhook request, without another notification.
-
-## From webhook to delivery
-
-1. **Select a policy** using the alert's labels.
-2. **Evaluate the calendar** against the alert's reported interval and find its next eligible opportunity.
-3. **Record known lifecycle state** in durable modes and schedule work if necessary.
-4. **Authorize delivery** when the occurrence is eligible and its lifecycle permits it.
-5. **Dispatch and record receipts** independently for each configured destination, if delivery is enabled.
-
-These are conceptual stages, not necessarily synchronous operations. Calendar overlap alone does not imply that a destination has been authorized or contacted.
-
-## Selecting a policy
-
-The proxy examines `sla_definitions` in configuration order. The first definition whose selection label has a nonempty value determines the policy map to consult.
-
-For example, `sla_id: business-hours-se` selects `business-hours-se` from the `sla_id` definition. A separate definition using `sla_name` may reuse that value with a different schedule. **Policy identity is the selection-label/value pair**, not the value alone.
-
-Missing labels are skipped as `missing_sla_label`. An unknown value is skipped as `unknown_sla` **without trying subsequent definitions**. Selecting a policy does not mean its SLA window is open. In durable modes, known resolutions remain accepted even after policy removal.
-
-## SLA calendars and eligibility
-
-An alert does not need to start during an SLA window to become eligible. An alert that starts outside SLA can become eligible if it is still active when the next SLA window opens.
-
-The calendar engine determines whether `startsAt` falls inside an SLA window and finds the first eligible instant at or after `startsAt`. For a resolved alert, eligibility is confirmed when that instant occurs strictly before `endsAt`. For firing alerts, the durable scheduler considers the alert active until a resolution has been recorded.
-
-For a resolved alert, the active period begins at `startsAt` and ends at `endsAt`. The alert is no longer considered active at the exact moment `endsAt` occurs.
-
-### Alert lifecycle versus proxy processing
-
-To understand how the SLA Proxy makes decisions, it is important to distinguish two timelines:
-
-- **Alert lifecycle:** When an alert actually started and resolved, as reported by Alertmanager through `startsAt` and `endsAt`.
-- **Proxy processing:** When the proxy received those notifications, evaluated SLA eligibility, authorized delivery, and recorded successful delivery receipts.
-
-These timelines are not necessarily synchronized. Notifications can arrive late, and the proxy cannot know about a resolution until it receives the corresponding notification.
-
-**Example: An alert resolves before SLA opens**
-
-Assume the SLA window opens at 08:00:
-
-1. At 07:30, the alert fires and the proxy receives the firing notification.
-2. At 07:45, the alert resolves.
-3. At 08:00, the SLA window opens.
-
-If the proxy receives the resolution notification before 08:00, it knows the alert is no longer active and does not authorize firing delivery.
-
-However, if the resolution notification is delayed until 08:10, the proxy still considers the alert firing at 08:00. It may therefore authorize and deliver the firing notification.
-
-When the delayed resolution arrives, the proxy records the actual resolution time of 07:45. If a destination has a successful firing receipt, it can subsequently receive the resolution notification.
-
-```mermaid
-flowchart TB
-subgraph AL["Actual alert lifecycle"]
-direction LR
-A["07:30 - Alert fires"]
-B["07:45 - Alert resolves"]
-A --> B
-end
-
-    subgraph PX["SLA Proxy processing"]
-        direction LR
-        C["07:30 - Firing webhook received"]
-        D["08:00 - SLA window opens"]
-        E["08:00 - Firing delivery may be authorized"]
-        F["08:10 - Resolved webhook received"]
-        C --> D --> E --> F
-    end
-
-    A -.-> C
-    B -. "Notification delayed" .-> F
-```
-**The key principle:** The SLA calendar determines when firing delivery is permitted. The proxy's durable known state determines whether the alert is considered active at that time. Once a destination has a successful firing receipt, its resolution may be delivered even outside the SLA window.
-
-### How firing and resolved alerts interact with SLA windows
-
-An alert may start before an SLA window opens, remain active during the window, and resolve after the window closes.
-
-The SLA Proxy uses the alert's start and resolution times to determine whether the alert was active during an SLA window.
-
-For example, with an SLA window of **08:00–17:00**:
-
-|Alert starts at | Alert resolves at | Expected behavior when notifications arrive in time|
-|---|---|---|
-| 07:30 | 07:45 | The alert resolves before SLA opens. It is not eligible for firing delivery. |
-| 07:30 | 08:00 | The alert resolves exactly when SLA opens. There is no overlap, so firing delivery is not authorized if the resolution is already known. |
-| 07:30 | 08:30 | The alert is still active when SLA opens at 08:00 and can become eligible for firing delivery. |
-| 09:00 | 10:00 | The alert starts during SLA and can be delivered immediately. |
-| 16:55 | 17:30 | The alert starts during SLA. Its firing notification can be delivered, and its resolution can be delivered after SLA closes. |
-| 17:05 | 18:00 | The alert starts after SLA closes and resolves before another SLA window opens. It is not eligible for firing delivery. |
-
-These examples assume the proxy receives the resolution before making a conflicting delivery authorization decision. Delayed notifications can produce different delivery behavior, as explained above.
-
-**How the proxy handles firing notifications**
-
-When a firing notification arrives, the durable SLA Proxy records the occurrence as firing. If the SLA window is currently open, it can become eligible immediately. Otherwise, the proxy schedules it for the next eligible SLA window.
-
-The proxy continues to consider the occurrence firing until it receives a resolution notification.
-
-**How the proxy handles resolutions**
-
-When a resolution notification arrives, the proxy records that the occurrence has ended.
-
-- If the alert resolved before becoming eligible, and firing delivery was not yet authorized, the pending firing delivery is cancelled.
-- If firing delivery was already authorized, an external delivery attempt may already be in progress.
-- A resolution can be delivered to a destination only after the proxy has recorded a successful firing receipt for that destination, even if the SLA window has since closed.
-
-**Important:** The proxy makes these decisions based on the notifications it has received, not by continuously checking whether the alert is still firing in Alertmanager. A delayed or lost resolution notification can therefore affect delivery decisions.
-
-### Notification evidence versus durable known state
-
-A **resolved** notification provides a complete interval. Given sufficient calendar coverage, overlap can be established or ruled out.
-
-A **firing** notification establishes activity at `startsAt`, but does **not prove continuous activity until reception**. A firing notification's `endsAt` may be an expiry estimate, not a resolution. `evaluated_at` is the processing clock and observation cutoff; it never replaces `startsAt` or `endsAt` and cannot prove activity at a past calendar opportunity.
-
-In contrast, **durable known state assumes that an accepted firing occurrence remains firing until a resolution is recorded**. This lets the scheduler act at a later SLA opening without another webhook. A delayed or lost resolution can therefore cause delivery after the underlying condition has cleared.
-
-### What `eligibility_status` means
-
-This field describes **notification evidence**, not durable scheduling or destination delivery.
-
-| Status | Meaning |
+| Mode | Behavior |
 |---|---|
-| `eligible` | A resolved interval demonstrably overlaps SLA; or a firing alert started inside SLA at or before the observation cutoff. Confirms historical overlap, not current activity or delivery. |
-| `ineligible` | A resolved interval is proven not to overlap SLA, or is empty. Never assigned solely because a firing alert began outside SLA. |
-| `pending` | A firing alert started at or before the cutoff and its first eligible instant is strictly **after** the cutoff. A conditional future opportunity, not a durable pending record. |
-| `unknown` | Evidence cannot establish overlap: for example, a later firing opportunity has passed without proof of continued activity, `startsAt` is after the cutoff, or bounded search/coverage is insufficient. |
-| `error` | Calendar evaluation failed; no authoritative calendar or lifecycle conclusion is available. |
+| Observe-only | Select policies and evaluate notification evidence. No Valkey state, scheduling or sink calls. |
+| Durable-state-only | Persist occurrences, eligibility, scheduling and delivery intents in Valkey without contacting destinations. |
+| Durable delivery | Additionally dispatch authorized notifications asynchronously and record delivery receipts. |
 
-For an **08:00–17:00** SLA window:
-
-| Notification | Processing time | Observation | Durable interpretation |
-|---|---|---|---|
-| Resolved 07:30–07:45 | 08:05 | `ineligible` | No overlap for first firing delivery |
-| Resolved 07:30–08:00 | Any | `ineligible` | End at 08:00 is excluded |
-| Resolved 07:30–08:30 | Any | `eligible` | Historical overlap; actual delivery still depends on lifecycle and authorization |
-| Firing since 07:30 | 07:35 | `pending` | Retain firing state and schedule eligibility for 08:00 |
-| Firing since 07:30 | 08:05 | `unknown` | With no recorded resolution, durable known state treats it as firing and can make it eligible |
-| Firing since 16:55 | 17:10 | `eligible` | Activity at `startsAt` proves overlap |
-| Resolved 16:55–17:30 | Later | `eligible` | A sink with a firing receipt can receive resolution outside SLA |
-| Resolved 17:05–18:00 | Later | `ineligible` | No overlap |
-
-The distinction is deliberate: **`unknown` observation does not necessarily mean durable scheduling is blocked**. Likewise, `eligible` observation does not guarantee delivery.
-
-## Finding the next eligible time
-
-The calendar searches `startsAt`'s local date and the next `horizon - 1` local dates. The horizon counts **local dates**, not fixed 24-hour periods.
-
-`next_eligible_at` is the first eligible calendar instant **at or after `startsAt`**, expressed in UTC with nanosecond precision. It equals `startsAt` when that instant is inside SLA and can precede `evaluated_at` for delayed notifications. For a resolved alert it can also fall **at or after `endsAt`**; that is a calendar opportunity, **not** proof of overlap with the resolved interval.
-
-If the bounded search finds no eligible instant, `calendar_reason` is `no_eligibility_within_horizon` and no next instant is returned. `calendar_search_until`, when present, is exclusive: no eligible instant was found between `startsAt` and that boundary. A resolved interval ending at or before the boundary can be `ineligible` if coverage is complete; one extending beyond it, or lacking coverage, is `unknown`. A firing alert with no known future opportunity is `unknown`. **Search exhaustion never proves permanent ineligibility.**
-
-In durable modes, the scheduler uses the first eligible instant as its target. Without a recorded resolution it treats the occurrence as firing and records eligibility. Only the enabled dispatcher invokes sinks. Observe-only mode creates no wakeup or durable pending work.
-
-### Overnight windows, holidays and time zones
-
-Holiday exclusions apply to the **local date being tested**, including overnight carry. For a Monday 22:00–Tuesday 06:00 window, a Tuesday holiday excludes the Tuesday portion; a Monday holiday alone does not exclude Tuesday's carry. Explicit dates take precedence over dataset checks within valid coverage. Without a holidays block, only the weekly schedule applies.
-
-IANA time-zone rules apply. Nonexistent spring wall times have no eligible instants; matching repeated autumn wall times are eligible on both occurrences. Partial gaps, non-hour offsets and skipped dates are supported. Window starts are inclusive and ends exclusive.
-
-## Occurrences and known lifecycle
-
-An **occurrence** is the original Alertmanager fingerprint plus exact `startsAt` instant, normalized to UTC without losing nanoseconds. Different starts are different occurrences. `endsAt` records resolution timing but is not part of identity. Original labels, annotations and fingerprints are preserved; the proxy does not enrich or recalculate them.
-
-In durable modes:
-
-- No recorded resolution means **firing in known state**. If the SLA opens later, the scheduler can make the occurrence eligible without another webhook.
-- **First resolution wins.** Conflicting `endsAt` values hold work for investigation.
-- A late firing notification cannot reopen a retained resolved occurrence.
-- An orphan resolution creates terminal state, without retroactively authorizing first firing delivery.
-
-Lifecycle, eligibility, holds and delivery are separate dimensions. The proxy does not query Alertmanager to verify current activity and does not invent a receipt-age timeout. Delayed or lost resolutions can therefore lead to delivery after the underlying condition has resolved.
-
-## Destinations and asynchronous delivery
-
-A destination is a named `http` or `log` sink. Every selected occurrence freezes **all configured destinations at first durable acceptance**, including pending occurrences and state-only mode. New destinations apply only to new occurrences. There is no SLA-dependent destination routing.
-
-Each sink has independent delivery intents, retries and receipts. One sink's failure does not erase another's success.
-
-The following diagram shows the **successful path for one destination**, not all possible races or failures:
+A successful webhook response confirms observation or durable acceptance, depending on the mode. It does not confirm downstream delivery.
 
 ```mermaid
 flowchart TD
-    A[Durable occurrence accepted] --> B[Wait for SLA eligibility]
-    B --> C[Authorize firing for this destination]
-    C --> D[Attempt firing delivery]
-    D --> E[Destination reports success]
-    E --> F[Commit firing receipt in Valkey]
-    F --> G[Resolution may be delivered, even outside SLA]
-    G --> H[Attempt resolution delivery]
-    H --> I[Commit resolution receipt in Valkey]
+    A[Alertmanager webhook] --> B[Select SLA policy]
+    B --> C[Evaluate notification evidence]
+    C --> D{Durable mode?}
+    D -->|No| E[Return observation]
+    D -->|Yes| F[Record occurrence and schedule eligibility]
+    F --> G[Prepare destination work]
+    G --> H{Delivery enabled?}
+    H -->|Yes| I[Authorize and dispatch asynchronously]
+    H -->|No| J[Retain state without sink calls]
 ```
 
-A **delivery intent** is prepared work, not proof of an external call. **Authorization** is the durable decision permitting the first firing attempt. A sink success is acceptance at its boundary, not a durable receipt; the **receipt** is committed separately to Valkey.
+The diagram shows conceptual stages, not a synchronous request sequence. Durable eligibility and delivery can progress without another webhook. Known resolutions can still be accepted after policy removal.
 
-A firing receipt allows that **same sink** to receive resolution even outside SLA. Resolution **before first firing authorization** cancels unsent firing and does not produce a standalone resolution. Resolution **after authorization** can race an already permitted external call; authorized firing work may still need to complete or be retried.
+## SLA policies and calendars
 
-## At-least-once delivery and recovery
+An SLA policy defines when an alert qualifies under a calendar. Policies contain weekly time windows, a time zone and optional holiday exclusions.
 
-Sink I/O and a Valkey receipt cannot commit atomically. A sink may accept a request just before the process crashes or the receipt commit becomes uncertain. Recovery can then **repeat the same intent**.
+### Policy selection
 
-Stable intent IDs and an optional HTTP `Idempotency-Key` identify retries, but downstream deduplication is **not assumed**. HTTP `2xx` proves API acceptance, not completed incident processing. A log sink handler's success does not promise `fsync` or log-backend persistence.
+The proxy examines `sla_definitions` in configuration order. The first definition whose selection label has a nonempty value determines the policy map to consult. For example, `sla_id: business-hours-se` selects the policy `business-hours-se` in the `sla_id` definition.
 
-Durable work, claims and retry deadlines recover after restart, subject to Valkey persistence. Unresolved occurrences do not expire automatically. Outstanding or held delivery work can retain payloads beyond normal resolved retention. See [operations](operations.md) for recovery and [configuration](configuration.md) for settings.
+Policy identity is the label/value pair: `sla_id: business-hours-se` and `sla_name: business-hours-se` may select different policies. If no selection label has a value, the alert is skipped as `missing_sla_label`. An unknown value is skipped as `unknown_sla`, without falling through to later definitions.
 
-## File-backed holidays and policy versions
+### Calendar rules
 
-A policy can select one immutable [ICS holiday dataset](holiday-datasets.md). Dates exclude entire **local civil days**; its manifest explicitly declares covered years. Missing required coverage is an error, **not a workday**. Public holidays require an operator-supplied dataset; no country-specific holiday logic is compiled in. Runtime evaluation has no Python, network holiday-provider or reload dependency.
+Windows use local civil time in the configured IANA time zone. Starts are inclusive and ends exclusive. Nonexistent spring wall times have no eligible instants; matching repeated autumn wall times are eligible on both occurrences.
 
-`policy_version` hashes policy configuration, search horizon, holiday provider and calendar rule versions, including the dataset's sorted date-set/coverage hash. It is separate from occurrence identity and does **not** encode the deployed IANA database. Rebuild and retest after time-zone data updates; configuration changes require restart.
+Holiday exclusions apply to entire local dates, including the portion of an overnight window falling on that date. For a Monday 22:00–Tuesday 06:00 window, a Tuesday holiday excludes the Tuesday portion, while a Monday holiday alone does not exclude Tuesday's carry.
 
-Changed holiday dates **or coverage**, including a coverage extension, require a higher durable **policy epoch**. Affected historical bindings are held rather than silently recalculated; saved decisions are retained. There is no automatic migration or persistent dataset snapshot. Follow the [safe update procedure](holiday-datasets.md#install-and-update-safely).
+Public holidays are supplied through immutable ICS datasets with explicit coverage years; no country-specific logic or runtime network holiday provider is required. Explicit additional dates take precedence within valid coverage. Missing required coverage is an error, not a workday. Without a holidays block, only the weekly schedule applies.
 
-## Evidence identity and precision details
+See [configuration](configuration.md) for policy settings and [holiday datasets](holiday-datasets.md) for dataset preparation and updates.
 
-Within one request, calendar evaluations are reused only for the same selected policy pair and exact `startsAt` instant. Equivalent time-zone offsets share a cache entry without losing nanoseconds. No calendar decisions are cached across requests.
+## Alert occurrences and lifecycle
 
-Lifecycle observations remain distinct by policy, fingerprint, `startsAt`, alert status and, for resolved alerts, `endsAt`. Exact repeats share `alert_count`; firing/resolved inputs or differing resolution times do not merge. Enrichment remains a no-op.
+An occurrence is identified by the original Alertmanager fingerprint and exact `startsAt` instant. Different start times identify different occurrences, even if the fingerprint is identical. `endsAt` is not part of identity. Original fingerprints, labels and annotations are preserved.
 
-For exact fields and metrics see the [reference](reference.md); for operations and safe changes see [operations](operations.md) and [configuration](configuration.md).
+A firing notification reports the start of an occurrence. A resolved notification reports its end. A firing notification's `endsAt` can be an expiry estimate and is not treated as a resolution.
+
+In durable modes the proxy maintains **known lifecycle state** from accepted notifications. An occurrence remains known firing until a resolution is recorded. The proxy does not continuously query Alertmanager or automatically resolve an occurrence based on notification age.
+
+| Incoming notification | Durable lifecycle behavior |
+|---|---|
+| First firing | Record a firing occurrence |
+| Repeated firing | Retain the same occurrence |
+| First resolution | Record terminal resolved state |
+| Resolution without prior firing | Record terminal state; no retroactive first firing authorization |
+| Late firing for retained resolved occurrence | Do not reopen |
+| Conflicting resolution time | Retain first resolution time and hold work for investigation |
+
+Lifecycle, eligibility, holds and destination delivery are separate dimensions of state.
+
+## SLA eligibility
+
+An alert need not start inside an SLA window. It qualifies if its active interval overlaps an eligible window. For a resolved alert, the interval includes `startsAt` but excludes `endsAt`.
+
+### Calendar overlap
+
+Assume a daily SLA window of 08:00–17:00. The following diagram illustrates six resolved intervals (times are local).
+
+```mermaid
+flowchart TB
+    W["SLA window: [08:00, 17:00)"]
+    W --> N[No overlap]
+    W --> Y[Overlap]
+    N --> A["07:30–07:45"]
+    N --> B["07:30–08:00"]
+    N --> F["17:05–18:00"]
+    Y --> C["07:30–08:30"]
+    Y --> D["09:00–10:00"]
+    Y --> E["16:55–17:30"]
+```
+
+| Active interval | Calendar result | Reason |
+|---|---|---|
+| 07:30–07:45 | Ineligible | Ends before SLA opens |
+| 07:30–08:00 | Ineligible | End at opening is excluded |
+| 07:30–08:30 | Eligible | Active at opening |
+| 09:00–10:00 | Eligible | Starts inside SLA |
+| 16:55–17:30 | Eligible | Starts before SLA closes |
+| 17:05–18:00 | Ineligible | Ends before next opening |
+
+Historical overlap does not establish that delivery occurred or should now be authorized.
+
+### Finding the next eligible time
+
+The calendar searches from `startsAt` for the first eligible instant within a configured horizon of local dates. `next_eligible_at` describes that calendar opportunity, not a delivery deadline or proof of activity. It can be in the past or, for a resolved alert, at or after `endsAt`. Search exhaustion does not establish permanent ineligibility. See [reference](reference.md) for exact boundary semantics.
+
+### Notification evidence
+
+The observation field `eligibility_status` describes what the notification establishes, rather than the durable scheduler's decision. A resolved notification provides a complete interval. A firing notification establishes activity at its start but does not prove continuous activity until reception. The processing time (`evaluated_at`) is the observation cutoff, not an alert lifecycle timestamp.
+
+| Status | Meaning |
+|---|---|
+| `eligible` | Resolved interval demonstrably overlaps SLA, or firing started inside SLA at or before the cutoff |
+| `ineligible` | Resolved interval is empty or demonstrably does not overlap SLA |
+| `pending` | Firing started at or before the cutoff and first eligible opportunity is still in the future |
+| `unknown` | Evidence is insufficient, for example a later opportunity has passed without proof of activity, the start is after the cutoff, or search/coverage is insufficient |
+| `error` | Calendar evaluation failed |
+
+## Scheduling and delayed notifications
+
+The durable scheduler uses known lifecycle state to act at a future SLA opportunity. Unlike an individual observation, it assumes an accepted firing occurrence remains active until resolution is recorded. Observe-only mode creates no scheduled work.
+
+For an alert firing since 07:30 with SLA opening at 08:00:
+
+| Processing time | Notification observation | Durable interpretation |
+|---|---|---|
+| 07:35 | `pending` | Schedule evaluation for 08:00 |
+| 08:05 | `unknown` | Without a recorded resolution, the occurrence can become eligible |
+
+Thus `unknown` does not necessarily block durable eligibility, and `eligible` does not guarantee delivery.
+
+### Actual versus known lifecycle
+
+Suppose the alert resolves at 07:45 but its resolution notification arrives at 08:10.
+
+```mermaid
+sequenceDiagram
+    participant A as Alertmanager
+    participant P as SLA proxy
+    Note over A,P: 07:30 — Alert fires
+    A->>P: Firing notification
+    Note over A: 07:45 — Alert resolves
+    Note over P: 08:00 — SLA opens
+    Note over P: Occurrence still known as firing
+    Note over P: Firing delivery may be authorized
+    A->>P: 08:10 — Resolution (endsAt 07:45)
+    Note over P: Record actual resolution time
+```
+
+If resolution had arrived before authorization, the proxy would not authorize first firing delivery. In this example it may already have authorized firing at 08:00 because it did not yet know about the resolution. A lost resolution can leave the occurrence known firing indefinitely.
+
+## Destinations and asynchronous delivery
+
+A destination is a named HTTP or log sink. At first durable acceptance the occurrence freezes all configured destinations, including when pending or in state-only mode. New destinations apply only to new occurrences. There is no SLA-dependent destination routing.
+
+Each destination has its own binding, intents, authorization, attempts and receipts.
+
+```mermaid
+flowchart TD
+    A[Occurrence eligible] --> B[Destination A]
+    A --> C[Destination B]
+    A --> D[Destination C]
+    B --> E[Firing receipt committed]
+    C --> F[Retry pending]
+    D --> G[Firing receipt committed]
+```
+
+A failure at one destination does not erase another's success.
+
+### Delivery lifecycle
+
+A delivery intent is prepared work. Authorization is the durable decision permitting first firing delivery. A successful sink call establishes acceptance at the sink boundary; a receipt records that success separately in Valkey.
+
+```mermaid
+flowchart TD
+    A[Prepared firing intent] --> B{First authorization permitted?}
+    B -->|Known resolved before authorization| C[Cancel unsent firing]
+    B -->|Eligible and permitted| D[Authorize firing]
+    D --> E[Attempt firing delivery]
+    E -->|Retryable failure| E
+    E -->|Success| F[Commit firing receipt]
+    F --> G[Wait for or use recorded resolution]
+    G --> H[Attempt resolution delivery]
+    H -->|Retryable failure| H
+    H -->|Success| I[Commit resolution receipt]
+```
+
+This illustrates the successful and retryable paths, not every hold or failure.
+
+Resolution before first authorization cancels unsent firing and produces no standalone resolution. Resolution after authorization may race an external call; authorized firing work may still need to complete or be retried. A destination can receive resolution only after its own firing receipt has been committed, even outside SLA hours. There is no retroactive first authorization after resolution.
+
+## Reliability and recovery
+
+Sink I/O and Valkey receipt commits cannot be atomic. A sink may accept a request before a crash or an uncertain receipt commit. Recovery may repeat the same intent. Delivery uses at-least-once semantics, not exactly-once execution; permanent holds do not promise eventual success.
+
+Stable intent IDs and optional HTTP `Idempotency-Key` identify retries, but downstream deduplication is not assumed. HTTP 2xx means API acceptance, not completed downstream processing. Log sink success does not guarantee disk or backend persistence.
+
+Durable work, claims and retry deadlines recover after restart when Valkey retains the state. Unresolved occurrences do not expire automatically. Resolved state is subject to retention; outstanding or held work can retain payloads beyond normal retention. Replay protection is bounded by retained state.
+
+See [operations](operations.md) for retries, retention, recovery and troubleshooting.
+
+## Policy changes
+
+Durable occurrences retain their original policy and destination bindings. A policy version identifies the effective calendar configuration; the operator-controlled policy epoch activates catalog changes within a namespace.
+
+Changed policies, including holiday dates or coverage, require a higher epoch. Affected historical bindings are held rather than silently recalculated. Saved decisions remain intact and known resolutions are still accepted. Adding destinations requires a higher epoch and affects only new occurrences. Existing registered destinations cannot be changed, renamed or removed in place.
+
+Normal restarts with the same catalog and epoch recover existing work. A new namespace is a separate state domain, not a migration. Follow [safe policy and destination changes](operations.md#change-policies-and-destinations) and [holiday dataset updates](holiday-datasets.md#install-and-update-safely).
+
+For exact response fields and metrics see [reference](reference.md); for configuration settings see [configuration](configuration.md).

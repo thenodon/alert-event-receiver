@@ -1,6 +1,6 @@
 # SLA proxy configuration
 
-[Getting started](getting-started.md) · [Concepts](concepts.md) · [Operations](operations.md)
+[Getting started](getting-started.md) · [Concepts](concepts.md) · [Reference](reference.md) · [Operations](operations.md)
 
 Start with [getting started](getting-started.md) to validate the three operating modes.
 Use [minimal examples](../examples/README.md) for common tasks and
@@ -14,11 +14,168 @@ CLI flags: `-config` (string, default `alert-sla-proxy.yaml` in the current dire
 configuration-check-only flag is provided. Do not start a production durable
 configuration merely to validate it: startup can activate its namespace catalog.
 
-In the tables below, **Required** identifies fields that must be supplied when
-applicable; **Common** identifies settings normally changed during deployment;
-and **Advanced** identifies tuning best left at defaults initially. Defaults do
-not override mode-specific requirements. Changes to an existing durable catalog
-need the procedure in [safe configuration changes](operations.md#change-policies-and-destinations).
+## Part I — Configuration guide
+
+Use the following steps to assemble a deployment. The YAML fragments illustrate
+individual settings; combine them into one configuration document. For complete,
+runnable configurations, use the [examples](../examples/README.md).
+
+### Choose an operating mode
+
+```mermaid
+flowchart TD
+    A[Webhook processing] --> B{Durable enabled?}
+    B -->|No| C[Observe only]
+    B -->|Yes| D[Valkey state and scheduler]
+    D --> E{Delivery enabled?}
+    E -->|No| F[Durable state only]
+    E -->|Yes| G[Asynchronous dispatcher]
+    G --> H[Configured destinations]
+```
+
+| Setting or dependency | Observe only | Durable state only | Delivery enabled |
+|---|---|---|---|
+| `durable.enabled` | `false` | `true` | `true` |
+| `delivery.enabled` | `false` | `false` | `true` |
+| Valkey and scheduler | No | Yes | Yes |
+| Destination calls | No | No | Yes |
+| Outbound HTTP credentials resolved | No | No | If configured |
+
+Delivery without durable state is invalid. Start in observe-only mode to check
+policy selection and calendar behavior. See [operating modes](concepts.md#purpose-and-operating-modes).
+
+### Define SLA policies
+
+This example selects a policy using the alert label `sla_id`. An alert with
+`sla_id=business-hours` uses the weekday schedule; `sla_id=always` uses the
+full-week schedule.
+
+```yaml
+sla_definitions:
+  - sla_label: sla_id
+    slas:
+      business-hours:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["08:00-17:00"]
+          tuesday: ["08:00-17:00"]
+          wednesday: ["08:00-17:00"]
+          thursday: ["08:00-17:00"]
+          friday: ["08:00-17:00"]
+      always:
+        timezone: Europe/Stockholm
+        schedule:
+          monday: ["00:00-24:00"]
+          tuesday: ["00:00-24:00"]
+          wednesday: ["00:00-24:00"]
+          thursday: ["00:00-24:00"]
+          friday: ["00:00-24:00"]
+          saturday: ["00:00-24:00"]
+          sunday: ["00:00-24:00"]
+```
+
+Multiple definitions can use different selector labels. Their order matters;
+see [policy selection](concepts.md#policy-selection).
+
+### Add holiday exclusions
+
+Add this block alongside `timezone` and `schedule` inside the desired policy:
+
+```yaml
+holidays:
+  dataset: /etc/alert-sla-proxy/holidays/se.ics
+  additional_dates:
+    - "2026-12-24"
+    - "2026-12-31"
+```
+
+Install the dataset and its adjacent manifest before startup. The path above
+is illustrative, not a bundled file. Explicit dates can also be used without a
+dataset. See [holiday datasets](holiday-datasets.md) for generation, coverage and
+safe installation.
+
+### Enable durable state
+
+```yaml
+durable:
+  enabled: true
+  policy_epoch: 1
+  valkey:
+    address: localhost:6379
+    namespace: production-sla
+delivery:
+  enabled: false
+```
+
+Use a dedicated namespace for each independent lifecycle domain. Configure
+Valkey persistence and a non-evicting memory policy. Choose the final destination
+list before accepting alerts, even in state-only mode: existing occurrences
+retain their original destinations. The epoch above is for a new namespace,
+not an instruction to reset an existing epoch. See [safe configuration changes](operations.md#change-policies-and-destinations).
+
+### Configure destinations
+
+With durable state enabled, replace the `delivery` block with a configuration
+such as the following. The URL is illustrative and must be replaced with the
+actual connector endpoint.
+
+```yaml
+delivery:
+  enabled: true
+  sinks:
+    - id: local-log
+      type: log
+    - id: servicenow
+      type: http
+      http:
+        url: https://servicenow.example/inbound_event
+        timeout: 5s
+        basic_auth:
+          username: "${SERVICENOW_USERNAME}"
+          password: "${SERVICENOW_PASSWORD}"
+```
+
+Supply the referenced credentials in the process environment before starting
+delivery. For ServiceNow, configure its [Prometheus connector](https://www.servicenow.com/docs/r/it-operations-management/event-management/prometheus-events-integration.html),
+integration permissions and field/CI handling. Verify against a real tenant
+before production. The proxy sends generic Alertmanager webhooks; see the
+[HTTP destination contract](reference.md#http-destination-contract).
+
+Destination IDs and registered settings must be chosen carefully: changing or
+removing a registered destination is not supported. Adding a destination does
+not add it to existing occurrences.
+
+### Secure the deployment
+
+```mermaid
+flowchart TD
+    A[Alertmanager and Prometheus] -->|Inbound TLS and Basic Auth| P[SLA proxy]
+    P -->|Valkey TLS and credentials| V[Valkey]
+    P -->|Outbound HTTPS and Basic Auth| H[HTTP destinations]
+```
+
+These security boundaries are independent and optional according to deployment
+mode. Use TLS for credentials crossing untrusted networks. Protect stored alert
+payloads, configuration and process credentials.
+
+| Boundary | Settings | Password reference example |
+|---|---|---|
+| Inbound webhook | `HTTP_*` environment variables | `HTTP_WEBHOOK_BASIC_AUTH_PASSWORD_ENV=WEBHOOK_PASSWORD` |
+| Valkey | `durable.valkey.*` | `password_env: VALKEY_PASSWORD` |
+| HTTP destination | `delivery.sinks[].http.*` | `password: "${DESTINATION_PASSWORD}"` |
+
+The first two reference a bare environment variable name; the HTTP destination
+uses whole-value interpolation. There is no general YAML environment expansion.
+See [shared HTTP security](../http-security.md) for inbound setup.
+
+## Part II — Configuration reference
+
+**Required** identifies fields that must be supplied when applicable;
+**Common** identifies settings normally changed during deployment; **Advanced**
+identifies tuning best left at defaults initially. Defaults do not override
+mode-specific requirements. Restart to apply changes and follow the
+[safe configuration change procedure](operations.md#change-policies-and-destinations)
+for existing durable namespaces.
 
 ## Listener and mode
 
@@ -32,38 +189,11 @@ need the procedure in [safe configuration changes](operations.md#change-policies
 | `durable.enabled` | boolean | `false` | Enable Valkey state and scheduling | Common |
 | `delivery.enabled` | boolean | `false` | Enable asynchronous sink calls; requires durable enabled | Common |
 
-The modes are `observe_only` (both disabled), `durable_state_only` (durable
-enabled, delivery disabled), and `delivery_enabled` (both enabled). Delivery
-cannot run without durable state.
-
 All configured sinks receive structural validation in every mode. Runtime sinks,
 outbound HTTP clients/transports and sink credential resolution are created only
 when delivery is enabled. Missing outbound HTTP credential environment variables
 do not prevent observe-only or state-only startup. Durable Valkey credentials
 are needed whenever durable mode is enabled.
-
-## Inbound HTTPS and endpoint authentication
-
-Both services use the same optional environment variables (strings, empty by
-default). These are not YAML settings:
-
-| Variable | Purpose |
-|---|---|
-| `HTTP_WEBHOOK_BASIC_AUTH_USERNAME` | Webhook username |
-| `HTTP_WEBHOOK_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
-| `HTTP_METRICS_BASIC_AUTH_USERNAME` | Independent metrics username |
-| `HTTP_METRICS_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
-| `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
-| `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
-
-An entirely empty pair disables that feature; partial/invalid pairs and missing
-referenced passwords fail startup. HTTPS uses the existing listener and port.
-Health/readiness routes bypass authentication but still use the listener protocol.
-Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
-networks; use HTTPS or an isolated backend behind a trusted TLS proxy. See the
-[shared security reference](../http-security.md) for constraints, examples, CA
-trust, Alertmanager/Prometheus configuration and rotation. Inbound security is
-independent of outbound OTLP, Valkey and HTTP sink security.
 
 ## Policies and calendars
 
@@ -83,7 +213,7 @@ Policy field paths in the last rows are relative to
 when policy names match. The first nonempty matching label selects its
 definition; unknown values are skipped without fallback. Selection is distinct
 from calendar eligibility: a valid policy can still be pending or ineligible.
-See [selection](concepts.md#selecting-a-policy).
+See [selection](concepts.md#policy-selection).
 
 Weekday keys are lowercase full English names. Windows use exact `HH:MM-HH:MM`
 syntax; `24:00` is allowed only as an end. Equal start/end is invalid; use
@@ -99,12 +229,6 @@ explicit coverage and SHA-bound metadata. Explicit dates must be valid, exact
 `YYYY-MM-DD` values. See the [dataset workflow](holiday-datasets.md) for public
 holidays, subdivisions, company closures and offline generation.
 
-The former `country` and `subdivision` YAML fields have been removed and are
-rejected as unknown fields. Generate/install the appropriate dataset and replace
-those fields with `dataset`; do not remove holiday exclusions unintentionally.
-Country/subdivision values in manifests and offline generator arguments remain
-informational provenance and data selection respectively.
-
 ## Durable state and Valkey
 
 | Key under `durable` | Type | Default | Purpose / constraints | Level |
@@ -119,11 +243,7 @@ informational provenance and data selection respectively.
 | `retention.completed_payload` | duration | `720h` | Positive payload retention after first durable resolution acceptance | Advanced |
 | `retention.tombstone` | duration | `2160h` | Longer than payload retention, at most 10 × 365 days | Advanced |
 
-Use a dedicated namespace per Alertmanager lifecycle domain. Durable webhook
-acceptance means selected inputs were committed to Valkey; it does not imply a
-separate disk/replica durability barrier or sink delivery. Use the same namespace,
-catalog and epoch for ordinary restarts; coordinate a higher epoch for catalog
-changes.
+Use a dedicated namespace per Alertmanager lifecycle domain. Use the same namespace, catalog and epoch for ordinary restarts; coordinate a higher epoch for catalog changes.
 
 No Cluster discovery, Sentinel, custom CA or client-certificate fields are
 provided. Configure persistence and noeviction on the server; application
@@ -213,17 +333,45 @@ applies even when delivery is disabled.
 | `retry_initial` | duration | `5s` | Initial retry backoff, at least poll interval |
 | `retry_max` | duration | `5m` | At least initial backoff, at most 1h |
 
-Webhook acceptance, external sink success and committed action receipts are
-separate events. Resolution delivery to a sink requires that sink's firing
-receipt. A sink operation may be repeated if the receipt commit fails; delivery
-is at least once, not exactly once.
+See [delivery lifecycle](concepts.md#delivery-lifecycle) for authorization, receipts and ordering.
 
-The default lease covers 10s delivery + 3 × 5s state-store budgets.
+The default lease of 30s covers a minimum of 25s (10s delivery + 3 × 5s state-store budgets), leaving 5s of margin. This is a configuration budget, not a prediction of actual operation durations.
+
+```mermaid
+flowchart LR
+    A[10s delivery budget] --> B[15s state-store budgets]
+    B --> C[5s remaining margin]
+    C --> D[30s default claim lease]
+```
+
+
 `Retry-After` may extend an individual retry deadline up to the separately
 bounded hint; this does not change `retry_max`. No retry-attempt limit,
 redrive endpoint or sink retirement setting exists. See
 [retry behavior](operations.md#delivery-ordering-and-retries).
 
-`durable.sink_id` and `delivery.sink` are obsolete and rejected. Stored
-occurrence format is 2; no legacy schema migration is provided. See
-[registry recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset).
+See [registry recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset) for registry inspection and recovery.
+
+## Inbound HTTPS and endpoint authentication
+
+Both services use the same optional environment variables (strings, empty by
+default). These are not YAML settings:
+
+| Variable | Purpose |
+|---|---|
+| `HTTP_WEBHOOK_BASIC_AUTH_USERNAME` | Webhook username |
+| `HTTP_WEBHOOK_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_METRICS_BASIC_AUTH_USERNAME` | Independent metrics username |
+| `HTTP_METRICS_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+| `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
+| `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
+
+An entirely empty pair disables that feature; partial/invalid pairs and missing
+referenced passwords fail startup. HTTPS uses the existing listener and port.
+Health/readiness routes bypass authentication but still use the listener protocol.
+Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
+networks; use HTTPS or an isolated backend behind a trusted TLS proxy. See the
+[shared security reference](../http-security.md) for constraints, examples, CA
+trust, Alertmanager/Prometheus configuration and rotation. Inbound security is
+independent of outbound OTLP, Valkey and HTTP sink security.
+

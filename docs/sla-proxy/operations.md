@@ -2,19 +2,34 @@
 
 [Getting started](getting-started.md) · [Concepts](concepts.md) · [Configuration](configuration.md) · [Metrics and HTTP reference](reference.md)
 
-This guide helps operators determine whether an alert was selected, accepted into durable state, authorized for delivery, sent to a destination, and recorded with a durable receipt. These are separate stages. Start with the diagnostic workflow below; use the later sections for delivery semantics, recovery and safe changes.
+Use this guide during incidents, routine maintenance and configuration changes. For the underlying lifecycle and delivery model, see [concepts](concepts.md); for exact fields and metrics, see [reference](reference.md).
+
+## Part I — Troubleshooting
 
 ## Diagnose a missing notification
 
-When an expected notification is missing, check the stages in order. A successful check at one stage does not establish success at the next.
+Start with the following diagnostic workflow. Readiness failure is a clue, not proof that previously authorized delivery has stopped. Investigate the specific occurrence and destination rather than relying on aggregate metrics alone.
 
-1. **Check service readiness and mode.** Query `/readyz` and inspect the webhook response or `webhook observation` log for `mode`. Observe-only never sends notifications; durable-state-only records state but does not send to sinks. A 200 from `/readyz` does not prove destination availability or that the queue is drained.
-2. **Check selection and acceptance.** Inspect `selected`, `skipped`, and, in durable modes, `persisted`, `persisted_count` and `failed_count`. A missing or unknown SLA label may produce a counted skip even when the webhook returns 200. A durable 503 may represent partial acceptance.
-3. **Check the occurrence's SLA and lifecycle state.** An alert may be pending until the next eligible window, held because of policy or horizon changes, or resolved before its first firing authorization. Observe-only `eligibility_status` is evidence about the notification, not a durable send decision.
-4. **Check the destination binding.** Each occurrence has independent bindings for its frozen destinations. Look for an authorized intent, a retry deadline, a hold, or an in-flight claim. Calendar eligibility alone does not create a receipt.
-5. **Check the sink attempt and durable receipt separately.** An HTTP 2xx or successful log sink call means the sink accepted the operation at its boundary. Verify the corresponding receipt commit; a lost or ambiguous commit can lead to a retry and duplicate external effect.
-
-For individual records, follow [Investigate an occurrence](#investigate-an-occurrence). For aggregate symptoms, use [Monitoring](#monitoring) and the [metrics reference](reference.md#delivery-logs-and-metrics).
+```mermaid
+flowchart TD
+    A[Expected notification missing] --> B{Service ready?}
+    B -->|No| C[Inspect store, calendar and catalog health]
+    B -->|Yes| D{Delivery enabled?}
+    D -->|No| E[Check operating mode]
+    D -->|Yes| F{Alert selected or known resolution?}
+    F -->|No| G[Check selection labels]
+    F -->|Yes| H{Occurrence accepted?}
+    H -->|No| I[Inspect acceptance failures]
+    H -->|Yes| J{Destination binding exists?}
+    J -->|No| K[Check frozen destination set]
+    J -->|Yes| L{Firing authorized?}
+    L -->|No| M[Inspect eligibility, lifecycle and holds]
+    L -->|Yes| N{Firing receipt committed?}
+    N -->|No| O[Inspect claims, attempts and retries]
+    N -->|Yes| P{Expected action?}
+    P -->|Firing| Q[Investigate downstream processing]
+    P -->|Resolution| R[Inspect resolution state and receipt]
+```
 
 ## Health, acceptance and delivery
 
@@ -28,7 +43,7 @@ For individual records, follow [Investigate an occurrence](#investigate-an-occur
 | Sink success / HTTP 2xx | External operation accepted at its boundary | Durable delivery receipt or completed downstream workflow |
 | Committed action receipt | Durable evidence of observed sink success | Exactly-once execution or downstream persistence |
 
-Start with `/readyz`, response counts and `webhook observation` logs. Inspect `mode`, `selected`, `skipped`, `persisted_count` and `failed_count` before reading delivery metrics. An unknown selection is a counted skip in a successful batch. Full request validation happens before state operations. Durable 503 may follow partial acceptance; retrying the full batch is supported, but does not roll back prior commits. `persisted` means Valkey acceptance under server persistence settings.
+Inspect `mode`, `selected`, `skipped`, `persisted_count` and `failed_count` in the webhook response or observation log. Validation precedes state operations. A durable 503 can follow partial acceptance; retry the whole batch without assuming prior commits were rolled back.
 
 ## Find the problem
 
@@ -46,9 +61,35 @@ Start with `/readyz`, response counts and `webhook observation` logs. Inspect `m
 | Horizon hold | Bounded calendar search found no opportunity; never treat it as permanent ineligibility |
 | Receipt missing after HTTP success | Receipt commit failed or is ambiguous; duplicate recovery is possible |
 | Ready check fails after rollout | Compare active policy epoch/catalog and schema readiness; old instances cannot keep committing |
-| Incomplete registry / quarantine | Follow [advanced recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset); do not delete control keys |
+| Incomplete registry / quarantine | Follow [advanced recovery](redis-debugging.md#recovering-from-inconsistent-valkey-state); do not delete control keys |
 
 ## Investigate an occurrence
+
+```mermaid
+flowchart TD
+    A[Fingerprint plus starts_at] --> B[Occurrence ID]
+    B --> C[Binding: ServiceNow]
+    B --> D[Binding: Log]
+    C --> E[Firing intent]
+    C --> F[Resolution intent]
+    D --> G[Firing intent]
+    D --> H[Resolution intent]
+    E --> I[Attempts and receipt]
+    F --> J[Attempts and receipt]
+    G --> K[Attempts and receipt]
+    H --> L[Attempts and receipt]
+```
+
+The diagram shows possible relationships, not a guarantee that all intents or receipts exist.
+
+| Identifier | Scope |
+|---|---|
+| `fingerprint` + `starts_at` | Exact alert occurrence |
+| `occurrence_id` | Durable occurrence record |
+| `binding_id` | Policy and destination binding |
+| `sink_id` | Configured destination |
+| `intent_id` | Logical firing or resolution delivery |
+| `attempt` | Individual attempt |
 
 Use the exact alert occurrence, not just its fingerprint: correlate `fingerprint` **and** `starts_at` from acceptance/lifecycle logs with `occurrence_id`, `binding_id`, `sink_id`, `intent_id`, action and attempt from delivery logs. One occurrence can have several independent sink bindings.
 
@@ -83,46 +124,7 @@ No transaction can atomically coordinate Valkey and HTTP/log side effects. A cra
 
 For bounded transport diagnostic classes, log fields and exact metric meanings, see [delivery logs and metrics](reference.md#delivery-logs-and-metrics). TLS errors and cancellation remain retryable. Raw endpoint, auth and transport errors are not retained in HTTP diagnostic errors. At-least-once attempts do not promise success for permanently held work.
 
-## Outages and recovery
-
-| Failure | Behavior / recovery |
-|---|---|
-| Valkey unavailable before startup | Durable initialization fails; observe-only requires no Valkey |
-| Valkey unavailable during operation | Acceptance returns 503, readiness fails, workers cannot safely commit. Restore the same store and restart if needed |
-| HTTP destination unavailable | Persisted exponential-backoff retries; other bindings remain independent, subject to the shared worker pool |
-| Sink accepted, receipt write unavailable | Outcome is ambiguous; recovery may resend with the same intent ID |
-| Process stops during a delivery | Authorized work and expired claims recover after restart; already accepted external effects cannot be undone |
-| Store data evicted/lost | Replay protection and pending work can be lost. Restore consistent backups; an epoch increment cannot recreate history |
-| Index corruption | Detecting process stops store work and attempts persistent quarantine. Follow the fence-first repair procedure; sibling writes may already have committed |
-
-Configure persistence, `noeviction`, storage capacity and exclusive schema ownership. AOF/fsync always reduces local crash loss; replication/failover still defines the actual loss window. There is no per-request disk/replica barrier. Back up occurrence records and all control registries consistently. Readiness is not proof of completed reconciliation or external destination readiness.
-
-**Recovery principle:** restore the same consistent state domain wherever possible. Do not create a new namespace, increment an epoch, or delete control keys as a substitute for recovering lost occurrences and receipts. A missing receipt after a successful external call remains ambiguous and may cause a duplicate on retry.
-
-## Change policies and destinations
-
-`durable.policy_epoch` is a positive, operator-controlled activation version for one namespace. Use the same epoch/catalog for normal restarts or concurrent instances. Increase it when activating policy/catalog/delivery-mode changes. A higher epoch fences old instances, so coordinate the rollout across all replicas.
-
-The full authoritative change matrix is in [configuration changes and key deletion](redis-debugging.md#configuration-changes-and-key-deletion).
-
-| Change | Required action and effect |
-|---|---|
-| SLA policy change/removal, including effective ICS dates or coverage | Use a higher epoch. Affected pinned bindings are held, not migrated; new occurrences use current selection. Known resolutions still commit. Restoring the exact pinned policy under a higher epoch can release holds |
-| Add a destination | Retain every registered destination unchanged and use a higher epoch. Only new occurrences gain the sink, including when old alerts are pending; no backfill |
-| Change/remove/rename a destination | Rejected even with a higher epoch. URL, query, type, per-sink timeout, auth mode/reference and idempotency settings are immutable; no application retirement/migration/redrive procedure |
-| Rotate credential values | Supported on restart without an epoch change if literal/reference modes and reference names remain the same. Permanent failures are not automatically redriven |
-| Change runtime tuning | Workers, polling, shared timeout and backoff changes need no epoch change, subject to validation. Existing retry/lease deadlines remain stored. Per-sink HTTP timeout is destination identity |
-| Change namespace/database/server | Creates a separate state domain unless data is preserved; does not migrate receipts, tombstones, authorizations or work |
-
-Before a rollout, identify the namespace, active epoch/catalog, registered sinks and affected pending/held bindings. Coordinate replicas so old processes do not continue attempting writes after the new epoch activates. After rollout, check `/readyz`, acceptance and hold metrics; an epoch increment activates a change but does **not** migrate old work.
-
-Never delete registries or individual keys to bypass startup validation. Older unsupported development formats require a deliberately separate disposable state domain or restoration; no in-place legacy migration is provided.
-
-## Retention and restart
-
-Unresolved occurrences have no automatic expiration. Resolved payloads normally compact 30 days after first durable resolution acceptance; tombstones expire after 90 days. Repeats do not extend deadlines. Outstanding/held delivery pins required state beyond retention, including ambiguous authorized firing and resolutions waiting for firing receipts. Maintenance applies retention eventually.
-
-Restart with the same namespace, catalog and epoch to recover pending work and expired claims. Compaction/deletion limits replay protection; very old webhook replays can become new work after tombstones expire. Retention tuning only affects newly recorded deadlines. Monitor unresolved, pending and held gauges and storage.
+### Part II — Operating the service
 
 ## Monitoring
 
@@ -153,9 +155,55 @@ Interpret these measurements according to their stage:
 
 Give scrape targets external labels for namespace/deployment; do not combine unrelated namespaces under one max. Gauges are sampled namespace-wide snapshots, not process-local counts. Sum counter rates across replicas where appropriate; **never sum namespace gauges**. No metric labels contain fingerprints or URLs. For metric definitions and additional scheduler/dispatcher metrics, see [reference](reference.md#delivery-logs-and-metrics).
 
-## Shutdown and routing
+### Additional monitoring queries
 
-SIGINT/SIGTERM stops readiness, closes the listener and drains active HTTP requests for at most `shutdown_timeout`. Expiry force-closes connections and exits nonzero. Listener failures, including occupied ports, also exit nonzero. HTTP header/read/idle timeouts are 5/10/60 seconds. The write timeout is 15s, extended in durable modes when needed to cover the operation timeout plus 1s.
+Filter each expression to the deployment under investigation. The failure ratio is undefined when there is no request traffic.
+
+```promql
+# Webhook failure ratio
+sum(rate(sla_proxy_notifications_received_total{status="5xx"}[5m]))
+/
+sum(rate(sla_proxy_notifications_received_total[5m]))
+
+# Policy evaluation errors
+sum by (reason) (rate(sla_proxy_policy_errors_total[5m]))
+
+# Scheduler errors
+sum by (operation) (rate(sla_proxy_scheduler_errors_total[5m]))
+
+# Delivery retries
+sum by (sink_id, action) (rate(sla_proxy_delivery_retries_total[5m]))
+
+# Unresolved and ready work (one namespace)
+max(sla_proxy_unresolved_occurrences)
+max(sla_proxy_delivery_ready_bindings)
+```
+
+### Recommended alerting conditions
+
+| Area | Investigate when |
+|---|---|
+| Ingestion | Sustained webhook failures or unexpected selection skips |
+| Calendar | Policy errors or dataset readiness failures |
+| Store | Sustained state-store errors or loss of readiness |
+| Scheduler | Increasing lag, persistent errors or growing due work |
+| Delivery | Sustained retries, growing ready backlog or held bindings |
+| Capacity | Unresolved state or storage grows beyond expected workload |
+
+Choose thresholds and evaluation periods based on normal traffic and operational objectives. Pending SLA work is not inherently a fault; a closed SLA window can legitimately create a backlog. Use the [metrics reference](reference.md#metrics-and-logs) for definitions.
+
+## Alertmanager routing
+
+```mermaid
+flowchart TD
+    A[Alertmanager] --> B{sla_managed equals true?}
+    B -->|Yes| C[SLA proxy]
+    B -->|Yes| D[Alert event receiver]
+    B -->|No| D
+    C --> E[SLA-controlled destinations]
+    D --> F[OTLP lifecycle events]
+    F --> G[Log backend]
+```
 
 Configure Alertmanager fan-out so the SLA proxy receives selected alerts and the event receiver still receives all alerts. Adapt this routing fragment to your existing configuration, including grouping and timing:
 
@@ -183,9 +231,102 @@ The unconditional final child route sends all alerts to the event receiver. A pa
 
 Use [native HTTPS and endpoint Basic Auth](../http-security.md), or a trusted TLS reverse proxy with an isolated backend. For HTTP outbound security and exact payload behavior see [reference](reference.md#http-destination-contract).
 
-## Advanced recovery
+## Secure webhook and metrics access
 
-Keep [Redis/Valkey debugging](redis-debugging.md) available for key-level investigation and the [fence-first repair procedure](redis-debugging.md#fence-first-quarantine-repair). Implementation details are in the [current implementation notes](../specifications/sla-proxy-implementation.md).
+Use the [shared inbound security guide](../http-security.md) for native HTTPS, independent Basic Auth, trusted-proxy deployments, CA trust and smoke tests. Defaults remain HTTP/no auth. Security errors fail before listening. Unauthorized requests return 401 before webhook processing; check client credentials rather than investigating lifecycle or sink retries. Health probes bypass Basic Auth but must use HTTPS when TLS is configured. Restrict probe/backend access through network controls. Restart after password/certificate rotation. Inbound security is independent of outbound connections and does not require deleting Valkey state or changing SLA policy epochs.
+
+`/readyz` also bypasses Basic Auth; its existing Valkey/calendar readiness checks remain in effect.
+
+## Retention and restart
+
+Unresolved occurrences have no automatic expiration. Resolved payloads normally compact 30 days after first durable resolution acceptance; tombstones expire after 90 days. Repeats do not extend deadlines. Outstanding/held delivery pins required state beyond retention, including ambiguous authorized firing and resolutions waiting for firing receipts. Maintenance applies retention eventually.
+
+Restart with the same namespace, catalog and epoch to recover pending work and expired claims. Compaction/deletion limits replay protection; very old webhook replays can become new work after tombstones expire. Retention tuning only affects newly recorded deadlines. Monitor unresolved, pending and held gauges and storage.
+
+<a id="shutdown-and-routing"></a>
+
+## Shutdown and restart
+
+SIGINT/SIGTERM stops readiness, closes the listener and drains active HTTP requests for at most `shutdown_timeout`. Expiry force-closes connections and exits nonzero. Listener failures, including occupied ports, also exit nonzero. HTTP header/read/idle timeouts are 5/10/60 seconds. The write timeout is 15s, extended in durable modes when needed to cover the operation timeout plus 1s.
+
+#### Part III — Changes and recovery
+
+## Outages and recovery
+
+| Failure | Behavior / recovery |
+|---|---|
+| Valkey unavailable before startup | Durable initialization fails; observe-only requires no Valkey |
+| Valkey unavailable during operation | Acceptance returns 503, readiness fails, workers cannot safely commit. Restore the same store and restart if needed |
+| HTTP destination unavailable | Persisted exponential-backoff retries; other bindings remain independent, subject to the shared worker pool |
+| Sink accepted, receipt write unavailable | Outcome is ambiguous; recovery may resend with the same intent ID |
+| Process stops during a delivery | Authorized work and expired claims recover after restart; already accepted external effects cannot be undone |
+| Store data evicted/lost | Replay protection and pending work can be lost. Restore consistent backups; an epoch increment cannot recreate history |
+| Index corruption | Detecting process stops store work and attempts persistent quarantine. Follow the fence-first repair procedure; sibling writes may already have committed |
+
+Configure persistence, `noeviction`, storage capacity and exclusive schema ownership. AOF/fsync always reduces local crash loss; replication/failover still defines the actual loss window. There is no per-request disk/replica barrier. Back up occurrence records and all control registries consistently. Readiness is not proof of completed reconciliation or external destination readiness.
+
+**Recovery principle:** restore the same consistent state domain wherever possible. Do not create a new namespace, increment an epoch, or delete control keys as a substitute for recovering lost occurrences and receipts. A missing receipt after a successful external call remains ambiguous and may cause a duplicate on retry.
+
+### Recovering an ambiguous delivery
+
+```mermaid
+sequenceDiagram
+    participant P as SLA proxy
+    participant V as Valkey
+    participant S as HTTP destination
+    P->>V: Commit authorization
+    V-->>P: Authorization committed
+    P->>S: POST with stable intent ID
+    S-->>P: HTTP 200
+    P->>V: Attempt receipt commit
+    Note over P,V: Store connection fails
+    Note over P: Process restarts
+    P->>V: Recover authorized work
+    V-->>P: No committed receipt found
+    P->>S: Retry with same intent ID
+    S-->>P: HTTP 200
+    P->>V: Commit receipt
+    V-->>P: Receipt committed
+```
+
+This example assumes the receipt was not committed. If it was committed but the reply was lost, recovery can find it and avoid repeating the action. A missing receipt is not proof of missing external delivery.
+
+## Change policies and destinations
+
+`durable.policy_epoch` is a positive, operator-controlled activation version for one namespace. Use the same epoch/catalog for normal restarts or concurrent instances. Increase it when activating policy/catalog/delivery-mode changes. A higher epoch fences old instances, so coordinate the rollout across all replicas.
+
+The full authoritative change matrix is in [configuration changes and key deletion](redis-debugging.md#configuration-changes-and-key-deletion).
+
+| Change | Required action and effect |
+|---|---|
+| SLA policy change/removal, including effective ICS dates or coverage | Use a higher epoch. Affected pinned bindings are held, not migrated; new occurrences use current selection. Known resolutions still commit. Restoring the exact pinned policy under a higher epoch can release holds |
+| Add a destination | Retain every registered destination unchanged and use a higher epoch. Only new occurrences gain the sink, including when old alerts are pending; no backfill |
+| Change/remove/rename a destination | Rejected even with a higher epoch. URL, query, type, per-sink timeout, auth mode/reference and idempotency settings are immutable; no application retirement/migration/redrive procedure |
+| Rotate credential values | Supported on restart without an epoch change if literal/reference modes and reference names remain the same. Permanent failures are not automatically redriven |
+| Change runtime tuning | Workers, polling, shared timeout and backoff changes need no epoch change, subject to validation. Existing retry/lease deadlines remain stored. Per-sink HTTP timeout is destination identity |
+| Change namespace/database/server | Creates a separate state domain unless data is preserved; does not migrate receipts, tombstones, authorizations or work |
+
+Before a rollout, identify the namespace, active epoch/catalog, registered sinks and affected pending/held bindings. Coordinate replicas so old processes do not continue attempting writes after the new epoch activates. After rollout, check `/readyz`, acceptance and hold metrics; an epoch increment activates a change but does **not** migrate old work.
+
+Never delete registries or individual keys to bypass startup validation.
+
+### Rollout workflow
+
+```mermaid
+flowchart TD
+    A[Prepare configuration change] --> B[Identify namespace, epoch and catalog]
+    B --> C[Review destinations and existing bindings]
+    C --> D{Changes registered destination identity?}
+    D -->|Yes| E[Stop: unsupported in existing state domain]
+    D -->|No| F{Requires higher epoch?}
+    F -->|Yes| G[Coordinate replicas and increase epoch]
+    F -->|No| H[Keep existing epoch]
+    G --> I[Deploy configuration]
+    H --> I
+    I --> J[Verify readiness]
+    J --> K[Verify webhook acceptance]
+    K --> L[Inspect pending and held work]
+```
 
 ## Dataset refresh and expiry
 
@@ -193,8 +334,7 @@ Use [offline holiday datasets](holiday-datasets.md) for generation, manifests, i
 
 `/readyz` warns when the current local date's rolling horizon no longer fits. Calendar evaluations reject uncovered dates even on unscheduled days or explicit additions. Readiness failure does not cancel already authorized sends or erase receipts. Known resolutions/saved decisions follow their pinned durable semantics. Restoring old bytes must also satisfy startup coverage; if old data has expired, exact restoration may be unavailable. No automatic migration/redrive is provided.
 
-## Secure webhook and metrics access
+## Advanced recovery
 
-Use the [shared inbound security guide](../http-security.md) for native HTTPS, independent Basic Auth, trusted-proxy deployments, CA trust and smoke tests. Defaults remain HTTP/no auth. Security errors fail before listening. Unauthorized requests return 401 before webhook processing; check client credentials rather than investigating lifecycle or sink retries. Health probes bypass Basic Auth but must use HTTPS when TLS is configured. Restrict probe/backend access through network controls. Restart after password/certificate rotation. Inbound security is independent of outbound connections and does not require deleting Valkey state or changing SLA policy epochs.
+Keep [Redis/Valkey debugging](redis-debugging.md) available for key-level investigation and the [fence-first repair procedure](redis-debugging.md#coordinated-storage-repair). Implementation details are in the [current implementation notes](../specifications/sla-proxy-implementation.md).
 
-`/readyz` also bypasses Basic Auth; its existing Valkey/calendar readiness checks remain in effect. Direct `Service.Handler()` tests include authentication but intentionally bypass listener TLS.

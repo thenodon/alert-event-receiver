@@ -69,12 +69,18 @@ curl -i http://127.0.0.1:9012/webhook \
   -H 'Content-Type: application/json' \
   --data-binary @/tmp/sla-demo-resolved.json
 ```
+The proxy should return HTTP 200 for both test webhooks. The response should indicate:
 
-Expect HTTP 200, `mode: observe_only`, `persisted: false`, `forwarded: false`,
-one selected alert and eligible observations. These results confirm policy and
-calendar observation, **not persistence or downstream delivery**. This mode
-creates no durable schedule and never contacts sinks. Missing or unknown SLA
-labels are counted as skips, so verify `selected`, not only HTTP status.
+- `mode: observe_only` — the proxy is running in observation mode.
+- `selected: 1` — the test alert matched the configured `demo` SLA policy.
+- `persisted: false` — no alert state was stored in Valkey.
+- `forwarded: false` — no notification was sent to an external destination.
+
+Because the example SLA schedule is open 24 hours a day, the selected alert should be evaluated as eligible.
+
+**Observe-only mode evaluates SLA policies and schedules without storing alert state or delivering notifications.** It is useful for verifying that alerts match the intended SLA policies before enabling durable processing and delivery.
+
+An HTTP 200 response alone does not mean that an alert matched an SLA policy. For example, an alert with a missing or unknown `sla_id` label may be accepted but skipped. Check the `selected` field to verify that the expected alert was selected.
 
 ## Persist state without delivery
 
@@ -100,13 +106,21 @@ both using the same `curl` commands. Fresh occurrences are useful in durable
 mode because previously accepted occurrences retain their identity and state;
 replaying an old pair is not a new lifecycle test.
 
-Expect schema version 3, `mode: durable_state_only`, `persisted: true` and
-occurrence summaries. `persisted: true` confirms Valkey acceptance of the selected
-inputs, **not delivery to any destination**. State survives restarting the proxy
-with the same configuration while Valkey retains the data. Stop/start does not
-require a higher policy epoch. Unresolved occurrences have no automatic expiry.
-This container has no persistent volume, so stopping/removing it discards the
-demo's storage.
+After sending the firing and resolved test webhooks, both requests should return HTTP 200.
+
+The responses should contain:
+
+- `mode: durable_state_only` — the proxy is storing alert lifecycle information without delivering notifications.
+- `persisted: true` — all selected alerts in the request were successfully written to Redis/Valkey.
+- `occurrences` — summaries of the alert occurrences stored or updated.
+
+Unlike observe-only mode, **durable-state-only mode stores alert information in Redis/Valkey**. However, it does not send notifications to any external destination.
+
+You can restart the SLA proxy without losing its stored state, provided Redis/Valkey retains the data, and you restart with the same configuration.
+
+**Note:** The Valkey container used in this example has no persistent storage volume. Removing the container deletes its stored data. For production, configure Valkey persistence and appropriate storage.
+
+For details about the HTTP response fields, see [HTTP response reference](reference.md#durable-responses).
 
 ## Deliver to a local HTTP destination and audit log
 
@@ -131,14 +145,14 @@ The mock prints the **full webhook payload**, including labels and annotations,
 plus status, alert count and idempotency key. Use test data only. It is a local
 verification tool, not a production destination. `-max-body` sets the request-body
 limit (default 1048576 bytes). Basic Authentication is optional when both
-`MOCK_USERNAME` and `MOCK_PASSWORD` are unset; setting only one fails startup.
+`MOCK_USERNAME` and `MOCK_PASSWORD` are set; setting only one fails startup.
 
 Set matching credentials in the proxy's terminal. The two variable names below
 are referenced by the proxy's YAML; the mock reads the separate `MOCK_*` variables:
 
 ```bash
-export SERVICENOW_USERNAME=documentation-user
-export SERVICENOW_PASSWORD=documentation-password
+export MOCK_USERNAME=documentation-user
+export MOCK_PASSWORD=documentation-password
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-delivery-http.yaml
 ```
 
@@ -183,10 +197,6 @@ with the same Valkey server. It uses its own namespace and needs no HTTP mock.
 Wait for the log sink's committed firing receipt before sending the resolution,
 just as in the HTTP trial; an emitted audit record alone is not the receipt.
 
-Production HTTP destinations should use HTTPS and credentials from a secret
-mechanism. Replace the loopback URL explicitly; the generic Alertmanager payload
-requires no ServiceNow-specific translation in this service.
-
 ## Add public holidays without country-specific code
 
 Use [the ICS example](../examples/alert-sla-proxy-ics.yaml) after installing a
@@ -201,23 +211,21 @@ install -m 0644 internal/slaproxy/testdata/holidays/holidays_se.ics.json \
 /tmp/alert-sla-proxy -config docs/examples/alert-sla-proxy-ics.yaml
 ```
 
-Run installation with suitable privileges and stop the earlier proxy first. This
-is a first install into an unused example directory; updates must switch a
-complete version directory atomically.
+Stop the previously running SLA proxy before starting this example. The installation commands may require elevated privileges to write to `/etc/alert-sla-proxy`.
 
-The ICS example selects the policy `business-hours-se`, whereas the generated
-test webhooks use `sla_id: demo`. Before sending them, change the `sla_id` value
-in **both generated JSON files** to `business-hours-se`. The generator's default
-policy name is not automatically changed by selecting a different YAML file.
+### Test the holiday-aware SLA policy
 
-Unlike the always-open demonstration policy, this policy has business-hour and
-holiday restrictions. Depending on the test timestamps, observations may be
-`eligible`, `pending`, `ineligible` or `unknown`. These are calendar/lifecycle
-outcomes, not necessarily configuration errors. The checked-in pair covers
-2020–2040; startup checks today's local date and the search horizon, not just
-test timestamps. Generate another country/subdivision using the
-[offline workflow](holiday-datasets.md). Python is used only during offline
-preparation, never by the Go service.
+The ICS example uses an SLA policy named `business-hours-se`, which applies Swedish public holidays and business-hour restrictions.
+
+The test webhook generator used earlier creates alerts with `sla_id: demo`. To test the new policy:
+
+1. Generate a fresh pair of firing and resolved webhooks using the earlier Python command.
+2. In both generated JSON files, change `sla_id` from `demo` to `business-hours-se`.
+3. Send the webhooks to the proxy using the same `curl` commands as before.
+
+Because this policy includes business hours and public holidays, the results depend on the alert timestamps. An observation may be `eligible`, `pending`, `ineligible` or `unknown`. These results do not necessarily indicate an error.
+
+The included Swedish holiday dataset covers 2020–2040. For other countries or regions, or to generate updated holiday data, see [Holiday datasets](holiday-datasets.md).
 
 ## Common startup and verification problems
 
@@ -232,10 +240,11 @@ preparation, never by the Go service.
 | HTTP 200 but no delivery | Check mode, selection, SLA eligibility, holds, authorization and receipts; see [occurrence investigation](operations.md#investigate-an-occurrence) |
 | `unknown_sla` | Demo webhooks use `sla_id: demo`; match the selected example's policy name |
 
-Do not switch these examples over the same production namespace. Namespaces are
-independent state domains, not migration tools. Changing an existing durable
-catalog or enabling delivery requires a higher epoch and preserves frozen
-historical destinations; see [operations](operations.md).
+The examples that use Redis/Valkey are configured with separate namespaces to keep their stored state independent.
+
+When testing different configurations, keep these namespaces separate. Do not reuse an existing production namespace for the examples.
+
+For production systems, changes to SLA policies or delivery configuration may require updating the policy epoch. See [Changing policies and destinations](operations.md#change-policies-and-destinations).
 
 Stop the proxy and HTTP mock with Ctrl-C. After finishing all durable demos:
 
