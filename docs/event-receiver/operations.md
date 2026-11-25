@@ -1,61 +1,82 @@
 # Receiver operations and troubleshooting
 
-[Getting started](getting-started.md) · [Configuration](configuration.md) · [Metrics and event reference](reference.md)
+[Getting started](getting-started.md) · [Concepts](concepts.md) · [Configuration](configuration.md) · [Metrics and event reference](reference.md)
+
+The event receiver maintains lifecycle state in Redis/Valkey and exports transition
+records through the OpenTelemetry Logs SDK. **Webhook success, state persistence,
+SDK submission, OTLP export and backend visibility are different outcomes.**
+This guide helps identify which stage failed and what can be recovered.
 
 ## Find the problem
 
 | Question / symptom | First checks |
 |---|---|
-| Is it healthy? | `/healthz` proves liveness only. Check Valkey operation errors and exporter errors separately |
-| Was a webhook accepted? | HTTP 200 and request/outcome counters; `webhook received` logs precede processing completion |
-| Was an event delivered? | Compare generated/submitted/export counters, then query the backend by fingerprint or event.id |
-| HTTP 400 | Fix invalid JSON, fingerprint or lifecycle timestamps; the whole batch is rejected before state writes |
-| HTTP 500 | Required state/processing error; other alerts may already have committed. Inspect errors before assuming retry restores events |
+| Is the process healthy? | `/healthz` proves HTTP liveness only. Inspect Valkey operation errors and OTLP exporter errors separately |
+| Was a webhook accepted? | Check HTTP response and request/outcome counters. A `webhook received` log precedes processing completion |
+| Was an event delivered? | Compare generated, SDK-submitted and exported counters, then query the backend by fingerprint or `event.id` |
+| HTTP 400 | Fix malformed JSON, fingerprint or lifecycle timestamps. The entire batch is rejected before state writes |
+| HTTP 401 | Check webhook Basic Auth credentials before investigating lifecycle processing |
+| HTTP 500 | Required state/processing operation failed. Other alerts in the batch may already have committed |
 | No event for a repeated alert | Expected: same occurrence/status refreshes state but emits no new transition |
-| Orphan or stale resolution | Compare fingerprint and exact startsAt with latest working state; see [inspection](../redis-debugging.md) |
-| Valkey outage | Required operations fail with 500; receiver startup fails if initial ping fails |
-| OTLP outage | SDK retries/buffers in memory only; final failures or queue overflow may lose records |
-| Restart | Working state remains in Valkey, in-memory batches do not. Already stored state can suppress later emission |
+| Orphan or stale resolution | Compare fingerprint and exact `startsAt` with the latest working state; see [Valkey inspection](redis-debugging.md) |
+| Valkey outage | Required operations fail with HTTP 500; receiver startup fails if the initial ping fails |
+| OTLP outage | SDK retries and buffers in memory only; final failures or queue overflow may lose records |
+| Restart | Valkey working state remains; in-memory batches do not. Stored state or idempotency keys may suppress later emission |
 
-## Delivery Semantics and Failure Handling
+The receiver has **no readiness endpoint**. A successful `/healthz` request does
+not establish that Valkey or the OTLP destination is currently reachable.
+
+## Trace a webhook through processing and delivery
+
+### 1. Webhook validation and lifecycle state
 
 Alertmanager webhook delivery is asynchronous and may be retried. The receiver
-validates each entire batch before changing state. Malformed JSON and invalid
-alerts receive HTTP 400; required Valkey read/write failures receive HTTP 500.
-Other valid alerts are still attempted after an operational error. A 500 response
-does **not** roll back previously written state, and a retried batch may already
-contain transitions that have been processed. An empty batch is accepted.
+validates the **entire batch before changing state**:
 
-Valkey maintains lifecycle state and emission idempotency keys, not a delivery
-queue. An idempotency command failure is best effort: it is logged and counted,
+- Malformed JSON or invalid alerts return **HTTP 400**; no alerts in that batch
+  enter lifecycle processing. An empty batch is accepted.
+- Required Valkey read/write failures cause **HTTP 500**. After an operational
+  error, the receiver still attempts the remaining valid alerts.
+- **HTTP 500 does not roll back earlier writes.** A retried batch can contain
+  transitions that have already been processed.
+
+Valkey stores lifecycle state and emission-idempotency keys, **not a delivery
+queue**. An idempotency command failure is "best effort": it is logged and counted,
 and emission continues after successful lifecycle state processing. Existing
-keys suppress emission only, without changing the detected processing outcome.
+idempotency keys suppress emission only; they do not change the detected
+processing outcome.
 
-The delivery stages have different meanings:
+For exact lifecycle transition rules, see [concepts](concepts.md#identity-and-transitions).
 
-1. **Generated:** a lifecycle event is created after its required state operation
-   succeeds, before emission deduplication. Repeated/stale notifications generate
-   no event. Existing idempotency keys can suppress a generated event's emission.
-2. **SDK submission:** the emitter calls Logger.Emit and returns nil. The
-   `events_emitted_total` metric and `EmissionAccepted` result mean only this.
-   The current Logs API offers no per-call queue-retention receipt: overflow,
-   shutdown, or a no-op provider may still discard records without an emit error.
-3. **Exporter success:** the configured OTLP exporter's Export call returned nil.
-   Its own network retries, if any, are included in that call and its duration.
-   This is not a count of network attempts.
-4. **Backend persistence:** the receiver does not query VictoriaLogs to verify
-   stored events. Exporter success, including success from an intermediate
-   Collector, is not proof that every event is durably stored or queryable.
+### 2. Event generation, SDK submission and export
 
-Events carry `event.id`: a lowercase SHA-256 digest of the JSON-encoded string
-array `[fingerprint, startsAtUTC, transition]`, with startsAt in RFC3339Nano.
-It is stable across repeat notifications and timezone representations, preserves
-nanosecond identity, and excludes endsAt. Event timestamps use original lifecycle time. Relevant processing
-failure logs contain the same ID, alert_fingerprint, and alert_transition; aggregate
-export failures intentionally do not identify a particular event. Normal per-alert
-outcomes are counters rather than success logs.
+| Stage | Evidence | Important limitation |
+|---|---|---|
+| Generated | `alertreceiver_events_generated_total` | Created after required state operation, before emission deduplication; an existing key can suppress submission |
+| SDK submission | `alertreceiver_events_emitted_total`; `EmissionAccepted` | `Logger.Emit` returned without a synchronous error. No per-call queue-retention receipt exists |
+| OTLP exporter success | `alertreceiver_otlp_export_requests_total{result="success"}` | An `Export` call returned nil; exporter-managed retries are included, not counted as separate calls |
+| Backend visibility | Query the log backend for the event | The receiver does not verify final durable persistence, including when exporting to an intermediate Collector |
+
+Repeated or stale notifications generate no new lifecycle event. SDK queue
+overflow, shutdown or a no-op provider can discard records without a synchronous
+`Logger.Emit` error. An OTLP exporter error can represent a partial result;
+export metrics are **not exact event-loss counters**.
+
+Events have a stable `event.id`: the lowercase SHA-256 digest of the JSON-encoded
+string array `[fingerprint, startsAtUTC, transition]`, where `startsAtUTC` uses
+RFC3339Nano. The ID preserves nanosecond identity, is stable across timezone
+representations and repeated notifications, and excludes `endsAt`. Event record
+timestamps use the original lifecycle time.
+
+Relevant processing failure logs include `event.id`, `alert_fingerprint` and
+`alert_transition`. Aggregate export failures intentionally do not identify
+individual events. Normal per-alert outcomes are exposed through counters,
+not success logs.
 
 ## Monitoring examples
+
+The following PromQL expressions help locate failures. They describe rates
+or processing outcomes, **not guaranteed backend persistence**.
 
 ```promql
 # Webhook processing failures and invalid requests
@@ -77,109 +98,109 @@ sum by (transition) (rate(alertreceiver_events_emitted_total[5m]))
 sum by (outcome) (rate(alertreceiver_processing_outcomes_total{outcome=~"repeated_.*|stale_.*"}[5m]))
 ```
 
-## SDK diagnostics, batching and shutdown
+Interpret the counters by stage. A difference between generated and submitted
+events can reflect idempotency suppression. A difference between submission and
+export metrics is **not** an exact loss count: batching, partial failures,
+concurrent scrapes and restarts affect comparisons. See the full
+[metrics reference](reference.md#prometheus-metrics).
 
-Application and SDK failures use structured logs with component, operation and
-best-effort redaction of textual error context. String values, error messages,
-and resolved slog groups are checked for configured authentication-header values,
-Redis passwords, and credentials/query strings in HTTP URLs. Opaque
-`slog.KindAny` values (such as maps, slices, structs, custom Stringers and JSON
-marshalers) are omitted rather than serialized; their contents are not recursively
-sanitized. `LogValuer` values are resolved and their resulting kind is handled by
-the same rules. Full alert payloads and annotations are not deliberately logged.
+## OTLP export failures and shutdown
 
-This is **not comprehensive sanitization of arbitrary SDK diagnostic data**.
-Unknown secrets, attribute/group names, and sensitive text not matching the known
-redaction patterns can remain visible. Operators should avoid putting secrets in
-diagnostic text or backend error messages and restrict access to application logs.
+The event receiver uses the OpenTelemetry Logs SDK to batch and export lifecycle events. Events are buffered **in memory only**; there is no persistent queue or replay mechanism.
 
-The SDK global error handler observes diagnostics independently of exporter
-metrics. Both SDK logging and error-handler configuration are process-global and
-installed once at startup. Queue-full warnings are routed to structured logs;
-there is no stable per-event rejection callback or queue-drop Prometheus counter
-in this implementation. Experimental SDK self-metrics and undocumented internals
-are not used. Queue overflow warnings are emitted when the SDK next exports or
-flushes, so a crash can prevent even that warning. Queue drops are observable
-through these structured SDK diagnostics but are **not counted** in
-`alertreceiver_otlp_export_requests_total` unless an Export call actually occurs,
-nor in `alertreceiver_otel_sdk_errors_total` unless the SDK invokes its error
-handler. In the installed SDK, queue overflow produces a logging warning, not an
-error-handler callback. Any later export is counted independently of the queue
-drop; neither counter is a queue-drop or permanent-loss counter.
+### Export failures and buffering
 
-For SDK queue, batching, timeout, retry and TLS settings see the
-[configuration reference](configuration.md#sdk-batching-and-attribute-limits).
-The application preserves SDK-managed batching/retry behavior and adds no retry
-queue. Export duration includes the exporter's own retries.
+When the OTLP destination is unavailable or returns a retryable error, the exporter retries within its configured timeout.
 
-**Outage example:** assume the HTTP receiver responds with retryable HTTP 503
-errors, with no special server-requested delay. A single event normally enters
-an export batch at the next scheduled export, roughly within one second when
-idle. The exporter retries, but the default batch deadline ends that export
-call after roughly 30 seconds. The SDK then discards that failed batch rather
-than putting it back into the queue. In this example the event may be held for
-roughly 31 seconds from submission, not indefinitely until the receiver returns.
-A non-retryable error can cause it to be discarded much sooner.
+Events can be permanently lost when:
 
-**Queue capacity example:** if an export is blocked and new lifecycle events
-arrive at 100 records/second, an initially empty 2,048-record pending queue fills
-in about `2048 / 100 = 20.5 seconds`. Further arrivals displace the oldest queued
-records, even while the in-flight export is still retrying. This estimate concerns
-the pending queue and excludes the batch already being exported; actual behavior
-depends on arrival rate and export completion times. Only generated lifecycle
-events enter this queue, not every repeated Alertmanager notification.
+- The in-memory queue becomes full.
+- An export fails after its retries or timeout are exhausted.
+- The receiver crashes or is forcibly terminated.
+- The receiver shuts down before all pending events are exported.
 
-There is no fixed retention duration for queued events. Increasing queue capacity
-can postpone overflow, and increasing timeouts can permit longer export attempts,
-but neither makes buffering durable or requeues a batch after final export
-failure. A restart loses in-memory records, and Valkey state/idempotency may
-suppress later notifications for events that were never delivered.
+The receiver does not automatically regenerate lost events. Redis/Valkey may already contain the lifecycle state and idempotency key, preventing subsequent notifications from producing the same event again.
 
-Shutdown first allows up to 10 seconds for HTTP requests to drain, then closes
-Valkey and allows up to 5 seconds for LoggerProvider.Shutdown to flush pending
-batches and release the exporter. Shutdown uses a fresh, non-cancelled context;
-startup failure paths also clean up initialized resources. Unexpected HTTP listener
-failures, including an occupied port, are logged and return a nonzero process exit
-code after cleanup; they are not treated as graceful shutdown. Timeout/flush/exporter
-shutdown errors produce structured logs. No shutdown-specific metrics are added.
-Final process counters may not be scraped before exit. A successful flush still
-provides no query-level persistence verification.
+For batching, queue capacity, retry and timeout settings, see [Configuration](configuration.md#sdk-batching-and-attribute-limits).
 
-### Remaining reliability limits
+### Monitoring and diagnostics
 
-Lifecycle state and idempotency keys are written **before** SDK submission.
-Crashes in that window, SDK queue drops, failures after submission, and forced
-termination can lose events. A crash may leave no diagnostic; normal shutdown
-only attempts to flush the in-memory queue within its deadline. Required state
-errors do not undo writes Valkey may already have accepted. Concurrent lifecycle
-decisions remain non-atomic; tombstone expiry limits occurrence history.
+Export failures and SDK warnings are written to structured application logs.
 
-The receiver is deliberately best effort: it has no transactional outbox,
-persistent queue, durable replay, custom retries, or exactly-once/end-to-end
-persistence guarantee. See [Valkey debugging](../redis-debugging.md) for state
-inspection and idempotency troubleshooting.
+The following Prometheus metrics are useful:
+
+| Metric | Purpose |
+|---|---|
+| `alertreceiver_otlp_export_requests_total` | Successful and failed OTLP export calls |
+| `alertreceiver_otel_sdk_errors_total` | Errors reported through the SDK error handler |
+| `alertreceiver_events_emitted_total` | Events submitted to the SDK, not necessarily exported |
+
+**These metrics do not provide an exact count of lost events.**
+
+In particular, SDK queue overflow produces a warning in the application logs but does not necessarily increment an error counter. A crash may also occur before the warning is written.
+
+For additional monitoring queries, see [Monitoring examples](#monitoring-examples).
+
+### Shutdown behavior
+
+During a normal shutdown, the receiver:
+
+1. Allows up to 10 seconds for active HTTP requests to complete.
+2. Closes the Redis/Valkey connection.
+3. Allows up to 5 seconds for the OpenTelemetry SDK to flush pending events and shut down.
+
+Shutdown and export errors are written to structured application logs.
+
+A successful SDK flush does not guarantee that events have been durably stored in the final log backend.
+
+### Diagnostic log security
+
+Application and SDK diagnostics use structured logging with best-effort redaction of known credentials and sensitive URL components.
+
+Redaction is not guaranteed to remove arbitrary sensitive information. Restrict access to application logs and avoid including secrets in diagnostic messages.
+
+## Recovery and reliability limits
+
+Lifecycle state and idempotency keys are written **before SDK submission**.
+Crashes in that window, SDK queue drops, failed exports and forced termination
+can lose events. A crash may leave no diagnostic. Normal shutdown only
+attempts to flush the in-memory queue within its deadline.
+
+Required state errors do not undo writes that Valkey may already have accepted.
+Concurrent lifecycle decisions remain non-atomic; tombstone expiry limits
+occurrence history. The receiver has **no transactional outbox, persistent
+queue, durable replay, custom retries or exactly-once/end-to-end persistence
+guarantee**.
+
+There is no supported manual replay or durable outbox repair procedure.
+Do **not** delete Valkey state or idempotency keys as a delivery-replay
+workaround: doing so can create duplicate or misclassified transitions.
+See [Valkey debugging](redis-debugging.md) for inspection and idempotency
+troubleshooting.
 
 ## Change configuration safely
 
-Restart after changing environment variables. OTLP changes do not require deleting
-Valkey keys. Deletion is not a delivery replay mechanism and can create duplicate
-or misclassified transitions. TTL changes affect future expirations only. Moving
-to another server/database starts a separate state domain unless data is preserved.
-Protect labels, annotations, OTLP headers and Valkey credentials; HTTP ingress
-supports native HTTPS/Basic Auth or a trusted TLS proxy; see the shared guide.
+Restart after changing environment variables. OTLP configuration changes do
+not require deleting Valkey keys. TTL changes affect **future expirations
+only**. Moving to another Redis/Valkey server or database starts a separate
+state domain unless the data is preserved.
 
-For exact key formats, TTL investigation and step-by-step diagnostics, use
-[Redis/Valkey debugging](../redis-debugging.md). The receiver has no supported
-manual replay or durable outbox repair procedure.
+Protect labels, annotations, OTLP headers and Valkey credentials. For exact
+key formats, TTL investigation and step-by-step diagnostics, use
+[Redis/Valkey debugging](redis-debugging.md).
 
 ## Secure webhook and metrics access
 
 Use the [shared inbound security guide](../http-security.md) for native HTTPS,
 independent Basic Auth, trusted-proxy deployments, CA trust and smoke tests.
-Defaults remain HTTP/no auth. Security errors fail before listening. Unauthorized
-requests return 401 before webhook processing; check client credentials rather
-than investigating lifecycle or sink retries. Health probes bypass Basic Auth
-but must use HTTPS when TLS is configured. Restrict probe/backend access through
-network controls. Restart after password/certificate rotation. Inbound security
-is independent of outbound connections and does not require deleting Valkey state
-or changing SLA policy epochs.
+Defaults remain HTTP without authentication. Security configuration errors
+fail before listening.
+
+Unauthorized requests return HTTP 401 before webhook processing; check client
+credentials before investigating lifecycle or export failures. Health probes
+bypass Basic Auth but must use HTTPS when TLS is configured. Restrict probe
+and backend access through network controls. Restart after password or
+certificate rotation.
+
+Inbound security is independent of outbound connections and does not require
+deleting Valkey state or changing SLA policy epochs.

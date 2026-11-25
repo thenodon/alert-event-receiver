@@ -5,3 +5,5 @@ victoria-logs-data
 test_alerts
 docs/benchmarks
 docs/specifications
+bin/
+otel_collector/

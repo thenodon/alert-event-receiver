@@ -10,6 +10,7 @@ the repository root unless a guide says otherwise.
 | Understand normal behavior | [Occurrences and lifecycle events](event-receiver/concepts.md) | [SLA eligibility and delivery](sla-proxy/concepts.md) |
 | Diagnose problems | [Operations](event-receiver/operations.md) | [Operations and configuration changes](sla-proxy/operations.md) |
 | Look up contracts | [Webhook, OTLP fields and metrics](event-receiver/reference.md) | [Webhook, payloads, metrics and logs](sla-proxy/reference.md) |
+| Inspect Valkey state | [Working state and idempotency](event-receiver/redis-debugging.md) | [Durable state, registries and recovery](sla-proxy/redis-debugging.md) |
 
 ## Holiday data
 
@@ -19,9 +20,7 @@ and subdivisions through local files and YAML, without runtime Python or network
 ## Shared tools and advanced operations
 
 - [Inbound HTTP security](http-security.md): shared HTTPS and endpoint Basic Auth for both applications.
-
 - [Configuration examples](examples/README.md): minimal scenarios and the complete SLA configuration.
-- [Redis/Valkey debugging](redis-debugging.md): key inspection, retention, immutable registries and corruption recovery.
 - [alertload](alertload.md): deterministic load generation, mixed scenarios and optional verification.
 - [Development](development.md): builds, tests, integration prerequisites and documentation validation.
 - [Specifications](specifications/README.md): historical designs, decisions, implementation details and benchmark reports.
