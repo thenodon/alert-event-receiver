@@ -100,7 +100,7 @@ curl --fail --cacert /etc/alert-http/ca.crt -u alertmanager \
   https://alerts.example.net:9012/webhook
 ```
 
-For the receiver, change the port to `9011` and omit `/readyz`.
+For the receiver, change the port to `9011`.
 For a custom SLA proxy webhook path, change the URL. Without Basic
 Auth, omit `-u`; without native TLS, use `http://` and omit `--cacert`.
 
@@ -171,11 +171,9 @@ increment `policy_epoch` solely for inbound security rotation.
 | SLA proxy configured `webhook_path` | Webhook credentials | Existing handler and method checks |
 | Either service `GET /metrics` | Metrics credentials | Existing metrics handler |
 | Either service `GET /healthz` | **No Basic Auth** | Liveness probe |
-| SLA proxy `GET /readyz` | **No Basic Auth** | Existing readiness checks |
+| Either service `GET /readyz` | **No Basic Auth** | Service readiness probe |
 
-The receiver has **no** `/readyz` endpoint. Existing method routing
-and unknown routes are unchanged. Restrict unauthenticated probe
-access at the network layer where appropriate.
+Restrict unauthenticated probe access at the network layer where appropriate.
 
 Missing, malformed or incorrect credentials produce
 `401 Unauthorized` and `WWW-Authenticate: Basic realm="webhook"`
@@ -250,7 +248,7 @@ forwarding deliberately and prevent direct access to the backend.
 | `401 Unauthorized` | Correct endpoint credential pair, client Authorization header, restart after credential rotation |
 | TLS trust or hostname error | Correct client CA and certificate SAN hostname; do not disable verification |
 | Probes fail after enabling HTTPS | Update probes to HTTPS and trusted CA; Basic Auth is still bypassed |
-| `/readyz` fails but TLS works | SLA proxy Valkey, policy or calendar readiness; unrelated to Basic Auth |
+| `/readyz` fails but TLS works | Check Valkey connectivity on the receiver. On the SLA proxy, check state store, policy and calendar readiness |
 | Webhook accepted but no downstream delivery | Receiver OTLP or SLA outbound sink operations; inbound security does not configure either |
 
 Shell exports are **not** automatically inherited by systemd or

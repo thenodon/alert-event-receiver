@@ -72,9 +72,10 @@ func run() (exitCode int) {
 
 	// Connect to Redis / Valkey.
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     cfg.RedisAddr,
-		Password: cfg.RedisPassword,
-		DB:       cfg.RedisDB,
+		Addr:                  cfg.RedisAddr,
+		Password:              cfg.RedisPassword,
+		DB:                    cfg.RedisDB,
+		ContextTimeoutEnabled: true,
 	})
 	defer func() {
 		if err := redisClient.Close(); err != nil {
@@ -92,7 +93,9 @@ func run() (exitCode int) {
 	emitter := telemetry.NewOTelEmitter("alert-event-receiver", version)
 	proc := processor.New(store, emitter, cfg.ClosedStateTTL, cfg.IdempotencyTTL, logger)
 
-	srv := newHTTPServer(cfg.Address, security, webhook.NewHandler(proc, logger))
+	srv := newHTTPServer(cfg.Address, security, webhook.NewHandler(proc, logger), func(ctx context.Context) error {
+		return redisClient.Ping(ctx).Err()
+	})
 
 	serveDone := make(chan error, 1)
 	go func() {
@@ -134,11 +137,20 @@ func run() (exitCode int) {
 }
 
 // Keep routing and server timeouts common to production and listener tests.
-func newHTTPServer(address string, security httpsecurity.Config, webhookHandler http.Handler) *http.Server {
+func newHTTPServer(address string, security httpsecurity.Config, webhookHandler http.Handler, pingValkey func(context.Context) error) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("POST /webhook", security.Webhook(webhookHandler))
 	mux.Handle("GET /metrics", security.Metrics(promhttp.Handler()))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := pingValkey(ctx); err != nil {
+			http.Error(w, "state store not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 	return &http.Server{
 		Addr: address, Handler: mux,
 		ReadHeaderTimeout: 5 * time.Second,

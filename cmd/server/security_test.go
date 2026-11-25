@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -53,7 +54,7 @@ func TestReceiverEndpointSecurity(t *testing.T) {
 					t.Fatal(err)
 				}
 				proc := &securityProcessor{}
-				server := newHTTPServer("127.0.0.1:0", security, webhook.NewHandler(proc, slog.New(slog.NewTextHandler(io.Discard, nil))))
+				server := newHTTPServer("127.0.0.1:0", security, webhook.NewHandler(proc, slog.New(slog.NewTextHandler(io.Discard, nil))), func(context.Context) error { return nil })
 				if server.ReadHeaderTimeout != 5*time.Second || server.ReadTimeout != 10*time.Second || server.WriteTimeout != 15*time.Second || server.IdleTimeout != 60*time.Second {
 					t.Fatal("timeouts changed")
 				}
@@ -124,7 +125,10 @@ func TestReceiverEndpointSecurity(t *testing.T) {
 				if request("GET", "/healthz", "", "") != 200 {
 					t.Fatal("health protected")
 				}
-				if request("GET", "/readyz", "", "") != 404 || request("POST", "/missing", "", "") != 404 || request("GET", "/webhook", "", "") != 405 {
+				if request("GET", "/readyz", "", "") != 200 {
+					t.Fatal("readiness probe failed")
+				}
+				if request("POST", "/missing", "", "") != 404 || request("GET", "/webhook", "", "") != 405 {
 					t.Fatal("routing changed")
 				}
 				if secure {
@@ -175,11 +179,18 @@ func TestReceiverInvalidSecurityHelper(t *testing.T) {
 }
 
 func TestReceiverDefaultRoutesInProcess(t *testing.T) {
-	server := newHTTPServer("", httpsecurity.Config{}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(202) }))
+	server := newHTTPServer("", httpsecurity.Config{}, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(202) }), func(context.Context) error { return errors.New("Valkey unavailable") })
 	w := httptest.NewRecorder()
 	server.Handler.ServeHTTP(w, httptest.NewRequest("POST", "/webhook", nil))
 	if w.Code != 202 {
 		t.Fatal(w.Code)
+	}
+	for path, want := range map[string]int{"/healthz": http.StatusOK, "/readyz": http.StatusServiceUnavailable} {
+		w := httptest.NewRecorder()
+		server.Handler.ServeHTTP(w, httptest.NewRequest("GET", path, nil))
+		if w.Code != want {
+			t.Errorf("%s returned %d, want %d", path, w.Code, want)
+		}
 	}
 }
 
@@ -229,7 +240,7 @@ func TestReceiverProcessHTTPAndHTTPS(t *testing.T) {
 			base := scheme + "://" + address
 			deadline := time.Now().Add(5 * time.Second)
 			for {
-				resp, err := client.Get(base + "/healthz")
+				resp, err := client.Get(base + "/readyz")
 				if err == nil {
 					resp.Body.Close()
 					if resp.StatusCode != 200 {

@@ -13,7 +13,11 @@ records, Prometheus metrics and query examples. For lifecycle decisions, see
 |---|---|---|
 | POST | `/webhook` | Validate the entire alert batch, then process alerts |
 | GET | `/metrics` | Prometheus exposition |
-| GET | `/healthz` | HTTP liveness only; does not check dependency readiness |
+| GET | `/healthz` | HTTP liveness |
+| GET | `/readyz` | Valkey connectivity. Returns `200` on a successful ping and `503` on failure or timeout |
+
+The readiness ping has a one-second deadline. Monitor OTLP export separately
+through exporter errors and SDK queue diagnostics.
 
 ### Validation and responses
 

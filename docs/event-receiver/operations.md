@@ -11,7 +11,7 @@ This guide helps identify which stage failed and what can be recovered.
 
 | Question / symptom | First checks |
 |---|---|
-| Is the process healthy? | `/healthz` proves HTTP liveness only. Inspect Valkey operation errors and OTLP exporter errors separately |
+| Is the process healthy? | `/healthz` checks HTTP liveness. Use `/readyz` to check Valkey connectivity |
 | Was a webhook accepted? | Check HTTP response and request/outcome counters. A `webhook received` log precedes processing completion |
 | Was an event delivered? | Compare generated, SDK-submitted and exported counters, then query the backend by fingerprint or `event.id` |
 | HTTP 400 | Fix malformed JSON, fingerprint or lifecycle timestamps. The entire batch is rejected before state writes |
@@ -23,8 +23,9 @@ This guide helps identify which stage failed and what can be recovered.
 | OTLP outage | SDK retries and buffers in memory only; final failures or queue overflow may lose records |
 | Restart | Valkey working state remains; in-memory batches do not. Stored state or idempotency keys may suppress later emission |
 
-The receiver has **no readiness endpoint**. A successful `/healthz` request does
-not establish that Valkey or the OTLP destination is currently reachable.
+Use `/readyz` for traffic routing and `/healthz` for liveness. If readiness
+returns `503`, check Valkey connectivity and credentials. Monitor OTLP export
+through exporter errors and SDK queue diagnostics.
 
 ## Trace a webhook through processing and delivery
 
