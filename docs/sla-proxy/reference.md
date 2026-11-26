@@ -173,7 +173,7 @@ HTTP 200 and `persisted: true` require every selected notification to commit to
 Valkey. A failed input returns HTTP 503 with `persisted: false`,
 `persisted_count` and `failed_count`; other inputs are still attempted.
 Alertmanager can retry the whole batch, including already committed occurrences,
-without duplicating logical intents. Valkey acceptance is subject to its
+without creating duplicate [delivery intents](concepts.md#delivery-lifecycle). Valkey acceptance is subject to its
 persistence and failover settings; a lost transaction response does not prove
 rollback. Validation failures return 400 before state access, and oversized
 requests return 413.

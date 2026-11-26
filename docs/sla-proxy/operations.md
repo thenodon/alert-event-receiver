@@ -65,15 +65,17 @@ Inspect `mode`, `selected`, `skipped`, `persisted_count` and `failed_count` in t
 
 ## Investigate an occurrence
 
+Each sink binding can have separate firing and resolved [delivery intents](concepts.md#delivery-lifecycle) stored by the proxy.
+
 ```mermaid
 flowchart TD
     A[Fingerprint plus starts_at] --> B[Occurrence ID]
     B --> C[Binding: ServiceNow]
     B --> D[Binding: Log]
     C --> E[Firing intent]
-    C --> F[Resolution intent]
+    C --> F[Resolved intent]
     D --> G[Firing intent]
-    D --> H[Resolution intent]
+    D --> H[Resolved intent]
     E --> I[Attempts and receipt]
     F --> J[Attempts and receipt]
     G --> K[Attempts and receipt]

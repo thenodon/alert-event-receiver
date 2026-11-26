@@ -290,7 +290,7 @@ add destinations to old occurrences.
 | `http.timeout` | duration | none | Positive and no greater than dispatcher delivery timeout | Required for HTTP |
 | `http.basic_auth.username` | string | absent | Literal or exact `${NAME}`; provide with password | Common when authenticated |
 | `http.basic_auth.password` | string | absent | Literal or exact `${NAME}`; provide with username | Common when authenticated |
-| `http.idempotency_key` | boolean | `true` | Send stable intent ID in Idempotency-Key; destination deduplication is not assumed | Advanced |
+| `http.idempotency_key` | boolean | `true` | Send the stable [delivery intent](concepts.md#delivery-lifecycle) ID in `Idempotency-Key`; destination deduplication is not assumed | Advanced |
 
 Both auth fields may be absent for an unauthenticated destination. Otherwise
 each must resolve nonempty when delivery is enabled. Username cannot contain
