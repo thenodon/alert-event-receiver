@@ -65,6 +65,12 @@ Inspect `mode`, `selected`, `skipped`, `persisted_count` and `failed_count` in t
 
 ## Investigate an occurrence
 
+Use the [inspection API](reference.md#occurrence-inspection) to find stored
+occurrences by alert name, lifecycle or sink state. Fetch an occurrence by ID
+to inspect its per-sink holds, retries and receipts. For example, a query for
+`lifecycle=firing&sink_id=servicenow&delivery=delivery_failed` lists firing
+occurrences with a failed ServiceNow binding.
+
 Each sink binding can have separate firing and resolved [delivery intents](concepts.md#delivery-lifecycle) stored by the proxy.
 
 ```mermaid

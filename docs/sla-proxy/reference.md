@@ -15,6 +15,8 @@ For diagnosis and recovery procedures, see [operations](operations.md).
 | GET | `/metrics` | Independent Prometheus registry |
 | GET | `/healthz` | HTTP liveness |
 | GET | `/readyz` | Observation capability and rolling dataset coverage, or additionally active policy/store readiness in durable modes; HTTP 503 while stopping/unavailable |
+| GET | `/api/v1/occurrences` | List stored occurrences in durable modes |
+| GET | `/api/v1/occurrences/{occurrence_id}` | Inspect a stored occurrence and its sink bindings |
 
 ### Input validation
 
@@ -72,6 +74,80 @@ commit are distinct events. See [delivery ordering](operations.md#delivery-order
 | `received` | Number of alerts in the validated batch |
 | `selected` | Number selected for processing |
 | `skipped` | Number excluded by selection |
+
+## Occurrence inspection
+
+Both routes are available in durable modes. To require Basic Auth,
+[configure separate inspection credentials](configuration.md#inbound-https-and-endpoint-authentication).
+Responses are JSON on success and use `Cache-Control: no-store`.
+
+`GET /api/v1/occurrences` accepts these optional parameters:
+
+| Parameter | Match |
+|---|---|
+| `lifecycle` | `firing` or `resolved` |
+| `alertname`, `fingerprint` | Exact occurrence values |
+| `sink_id`, `hold_reason` | Exact binding values shown by the inspection API |
+| `eligibility` | `eligible`, `ineligible`, `pending` or `unknown` |
+| `delivery` | `not_delivered`, `pending_delivery`, `delivered` or `delivery_failed` |
+| `limit` | Maximum results per page, 1–100, default 25 |
+| `cursor` | Opaque `next_cursor` from the previous page, with the same filters |
+
+Binding filters must all match the same binding. Each matching item includes
+all its bindings. Once a binding has a committed receipt for its resolved
+notification, inspection omits its `hold_reason` from list and detail results
+and excludes that binding from hold filter matches. A firing receipt alone
+still allows a hold to appear. The stored hold and Valkey indexes are unchanged.
+
+Resolved records can be inspected until retention deletes them.
+Compacted records without an alert name are omitted from exact name searches.
+
+Detail responses include lifecycle and retention timestamps, record version,
+resolution conflicts, and per-sink policy versions, holds, next evaluation,
+lease expiry, attempts, retry time and committed receipts where present.
+`firing` represents the last accepted lifecycle. Stored eligibility can remain
+`eligible` after the SLA window closes. See the [inspection specification](../specifications/sla-proxy-inspection-api.md)
+for the response and pagination contract.
+
+Invalid list parameters, cursors or occurrence IDs return `400`. Invalid
+credentials return `401` when inspection authentication is configured. An
+absent occurrence or an inspection request in observe-only mode returns `404`.
+An unavailable state read returns `503`.
+
+### Paginate occurrence results
+
+Start without a `cursor`. Set `limit` to the maximum number of items to return.
+For example, fetch the first page of firing occurrences:
+
+```bash
+page=$(curl -fsS 'http://localhost:9012/api/v1/occurrences?lifecycle=firing&limit=10')
+printf '%s\n' "$page" | jq .
+```
+
+The response contains an `items` array and, when more candidates remain, a
+`next_cursor` string. A response can have an empty `items` array and still
+provide a cursor because the list walks a bounded number of stored candidates
+per request:
+
+```json
+{"items": [], "next_cursor": "<opaque token>"}
+```
+
+Pass the returned token as `cursor` with the same filters. You can keep or
+change `limit`. Repeat with each new response until `next_cursor` is absent:
+
+```bash
+cursor=$(printf '%s\n' "$page" | jq -r '.next_cursor // empty')
+if [ -n "$cursor" ]; then
+  curl -fsSG 'http://localhost:9012/api/v1/occurrences' \
+    --data-urlencode 'lifecycle=firing' \
+    --data-urlencode 'limit=10' \
+    --data-urlencode "cursor=$cursor"
+fi
+```
+
+Ordering is unspecified, the walk is not a snapshot, and duplicate items can
+appear across pages. Use `occurrence_id` to deduplicate when needed.
 
 ## Observe-only responses
 

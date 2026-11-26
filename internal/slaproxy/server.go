@@ -44,9 +44,12 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	if logger == nil {
 		return nil, fmt.Errorf("logger is required")
 	}
-	security, err := httpsecurity.LoadFromEnv()
+	security, err := httpsecurity.LoadWithInspectionFromEnv()
 	if err != nil {
 		return nil, fmt.Errorf("configure inbound HTTP security: %w", err)
+	}
+	if cfg.Durable.Enabled && inspectionPathConflict(cfg.WebhookPath) {
+		return nil, fmt.Errorf("webhook_path conflicts with an inspection endpoint")
 	}
 	s := &Service{security: security, cfg: cfg, logger: logger, metrics: newMetrics(cfg)}
 	sinks := make(map[string]Sink, len(cfg.Delivery.Sinks))
@@ -118,6 +121,9 @@ func New(cfg Config, logger *slog.Logger) (*Service, error) {
 	mux := http.NewServeMux()
 	mux.Handle(cfg.WebhookPath, security.Webhook(http.HandlerFunc(s.webhook)))
 	mux.Handle("GET /metrics", security.Metrics(promhttp.HandlerFor(s.metrics.registry, promhttp.HandlerOpts{})))
+	if s.durable != nil {
+		s.registerInspection(mux)
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})

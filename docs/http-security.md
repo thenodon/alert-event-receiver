@@ -170,6 +170,7 @@ increment `policy_epoch` solely for inbound security rotation.
 | Receiver `POST /webhook` | Webhook credentials | Existing webhook handler |
 | SLA proxy configured `webhook_path` | Webhook credentials | Existing handler and method checks |
 | Either service `GET /metrics` | Metrics credentials | Existing metrics handler |
+| SLA proxy occurrence inspection routes in durable modes | Inspection credentials | Unauthenticated inspection |
 | Either service `GET /healthz` | **No Basic Auth** | Liveness probe |
 | Either service `GET /readyz` | **No Basic Auth** | Service readiness probe |
 
@@ -177,7 +178,7 @@ Restrict unauthenticated probe access at the network layer where appropriate.
 
 Missing, malformed or incorrect credentials produce
 `401 Unauthorized` and `WWW-Authenticate: Basic realm="webhook"`
-or `Basic realm="metrics"`. The protected handler is not invoked:
+`Basic realm="metrics"`, or `Basic realm="inspection"`. The protected handler is not invoked:
 an unauthorized webhook does not change alert state, emit events
 or increment application webhook-processing counters. A 401 is
 an **ingress authentication failure**, not an SLA rejection or

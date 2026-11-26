@@ -366,7 +366,19 @@ default). These are not YAML settings:
 | `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
 | `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
 
-An entirely empty pair disables that feature; partial/invalid pairs and missing
+The SLA proxy also accepts an independent credential pair for its durable-mode
+[inspection API](reference.md#occurrence-inspection).
+
+| Variable | Purpose |
+|---|---|
+| `HTTP_INSPECTION_BASIC_AUTH_USERNAME` | Inspection username |
+| `HTTP_INSPECTION_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+
+The inspection routes are available in durable modes. Leave both settings
+empty for unauthenticated access, or supply both to require Basic Auth.
+Use a different credential pair from webhook and metrics.
+
+An entirely empty pair disables the corresponding authentication or TLS setting. Partial or invalid pairs and missing
 referenced passwords fail startup. HTTPS uses the existing listener and port.
 Health/readiness routes bypass authentication but still use the listener protocol.
 Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted
