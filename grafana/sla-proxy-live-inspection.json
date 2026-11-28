@@ -1,0 +1,491 @@
+{
+  "apiVersion": "dashboard.grafana.app/v2",
+  "kind": "Dashboard",
+  "metadata": {
+    "name": "sla-proxy-live-inspection",
+    "generation": 2,
+    "creationTimestamp": "2026-11-27T15:57:06Z",
+    "labels": {},
+    "annotations": {}
+  },
+  "spec": {
+    "annotations": [
+      {
+        "kind": "AnnotationQuery",
+        "spec": {
+          "query": {
+            "kind": "DataQuery",
+            "group": "grafana",
+            "version": "v0",
+            "spec": {}
+          },
+          "enable": true,
+          "hide": true,
+          "iconColor": "rgba(0, 211, 255, 1)",
+          "name": "Annotations & Alerts",
+          "builtIn": true
+        }
+      }
+    ],
+    "cursorSync": "Crosshair",
+    "description": "Current occurrence and delivery-work samples from the SLA proxy inspection API. Each table shows the first page of its query.",
+    "editable": true,
+    "elements": {
+      "panel-1": {
+        "kind": "Panel",
+        "spec": {
+          "id": 1,
+          "title": "Occurrences by sink binding",
+          "description": "The first page contains up to 100 occurrences, expanded to one row per binding. An empty sample can have a continuation cursor. Open the API to traverse all pages.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "yesoreyeram-infinity-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${infinity}"
+                      },
+                      "spec": {
+                        "columns": [
+                          {
+                            "selector": "alertname",
+                            "text": "Alert",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "sink_id",
+                            "text": "Sink",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "sla_window",
+                            "text": "SLA window",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "sla_window_reason",
+                            "text": "Window reason",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "eligibility",
+                            "text": "Stored eligibility",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "delivery",
+                            "text": "Delivery",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "hold_reason",
+                            "text": "Hold reason",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "next_evaluation_at",
+                            "text": "Next SLA evaluation",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "starts_at",
+                            "text": "Started",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "as_of",
+                            "text": "Evaluated at",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "occurrence_id",
+                            "text": "Occurrence ID",
+                            "type": "string"
+                          }
+                        ],
+                        "format": "table",
+                        "parser": "backend",
+                        "root_selector": "($asOf := as_of; [items.($occ := $; bindings.{\n            \"alertname\": $occ.alertname, \"occurrence_id\": $occ.occurrence_id,\n            \"starts_at\": $occ.starts_at, \"sink_id\": sink_id,\n            \"sla_window\": sla_window, \"sla_window_reason\": sla_window_reason,\n            \"eligibility\": eligibility, \"delivery\": delivery, \"hold_reason\": hold_reason,\n            \"next_evaluation_at\": next_evaluation_at, \"as_of\": $asOf\n          })])",
+                        "source": "url",
+                        "type": "json",
+                        "url": "/api/v1/occurrences?limit=100&lifecycle=${lifecycle:percentencode}",
+                        "url_options": {
+                          "method": "GET"
+                        }
+                      },
+                      "labels": {
+                        "grafana.app/export-label": "yesoreyeram-infinity-datasource-1",
+                        "grafana.app/export-datasource-name": "sla-proxy-inspection"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.3.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "zebraStriping": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 80,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      },
+      "panel-2": {
+        "kind": "Panel",
+        "spec": {
+          "id": 2,
+          "title": "Delivery work by state",
+          "description": "The first page contains up to 100 matching intents. Retry and lease deadlines have separate columns. An empty sample can have a continuation cursor. Open the API to traverse all pages.",
+          "links": [],
+          "data": {
+            "kind": "QueryGroup",
+            "spec": {
+              "queries": [
+                {
+                  "kind": "PanelQuery",
+                  "spec": {
+                    "query": {
+                      "kind": "DataQuery",
+                      "group": "yesoreyeram-infinity-datasource",
+                      "version": "v0",
+                      "datasource": {
+                        "name": "${infinity}"
+                      },
+                      "spec": {
+                        "columns": [
+                          {
+                            "selector": "sink_id",
+                            "text": "Sink",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "action",
+                            "text": "Action",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "state",
+                            "text": "State",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "hold_reason",
+                            "text": "Hold reason",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "last_failure",
+                            "text": "Last failure",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "attempts",
+                            "text": "Attempts",
+                            "type": "number"
+                          },
+                          {
+                            "selector": "due_at",
+                            "text": "Due at",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "next_attempt_at",
+                            "text": "Next attempt",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "lease_expires_at",
+                            "text": "Lease expires",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "as_of",
+                            "text": "Evaluated at",
+                            "type": "timestamp"
+                          },
+                          {
+                            "selector": "dispatch_enabled",
+                            "text": "Dispatch enabled",
+                            "type": "string"
+                          },
+                          {
+                            "selector": "occurrence_url",
+                            "text": "Occurrence API path",
+                            "type": "string"
+                          }
+                        ],
+                        "format": "table",
+                        "parser": "backend",
+                        "root_selector": "($asOf := as_of; $enabled := delivery_enabled; [items.{\n            \"sink_id\": sink_id, \"action\": action, \"state\": state, \"attempts\": attempts,\n            \"hold_reason\": hold_reason, \"last_failure\": last_failure, \"due_at\": due_at,\n            \"next_attempt_at\": next_attempt_at, \"lease_expires_at\": lease_expires_at,\n            \"occurrence_url\": occurrence_url, \"as_of\": $asOf, \"dispatch_enabled\": $string($enabled)\n          }])",
+                        "source": "url",
+                        "type": "json",
+                        "url": "/api/v1/delivery-work?limit=100&state=${work_state:percentencode}",
+                        "url_options": {
+                          "method": "GET"
+                        }
+                      },
+                      "labels": {
+                        "grafana.app/export-label": "yesoreyeram-infinity-datasource-1",
+                        "grafana.app/export-datasource-name": "sla-proxy-inspection"
+                      }
+                    },
+                    "refId": "A",
+                    "hidden": false
+                  }
+                }
+              ],
+              "transformations": [],
+              "queryOptions": {}
+            }
+          },
+          "vizConfig": {
+            "kind": "VizConfig",
+            "group": "table",
+            "version": "13.3.2",
+            "spec": {
+              "options": {
+                "cellHeight": "sm",
+                "enablePagination": true,
+                "showHeader": true,
+                "zebraStriping": false
+              },
+              "fieldConfig": {
+                "defaults": {
+                  "thresholds": {
+                    "mode": "absolute",
+                    "steps": [
+                      {
+                        "value": 0,
+                        "color": "green"
+                      },
+                      {
+                        "value": 80,
+                        "color": "red"
+                      }
+                    ]
+                  },
+                  "custom": {
+                    "align": "auto",
+                    "cellOptions": {
+                      "type": "auto"
+                    },
+                    "footer": {
+                      "reducers": []
+                    },
+                    "inspect": false
+                  }
+                },
+                "overrides": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "layout": {
+      "kind": "RowsLayout",
+      "spec": {
+        "rows": [
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Occurrences",
+              "collapse": false,
+              "hideHeader": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 24,
+                        "height": 12,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-1"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "kind": "RowsLayoutRow",
+            "spec": {
+              "title": "Delivery work",
+              "collapse": false,
+              "hideHeader": false,
+              "layout": {
+                "kind": "GridLayout",
+                "spec": {
+                  "items": [
+                    {
+                      "kind": "GridLayoutItem",
+                      "spec": {
+                        "x": 0,
+                        "y": 0,
+                        "width": 24,
+                        "height": 12,
+                        "element": {
+                          "kind": "ElementReference",
+                          "name": "panel-2"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "links": [],
+    "liveNow": false,
+    "preload": false,
+    "tags": [
+      "sla-proxy"
+    ],
+    "timeSettings": {
+      "timezone": "browser",
+      "from": "now-6h",
+      "to": "now",
+      "autoRefresh": "1m",
+      "autoRefreshIntervals": [
+        "5s",
+        "10s",
+        "30s",
+        "1m",
+        "5m",
+        "15m",
+        "30m",
+        "1h",
+        "2h",
+        "1d"
+      ],
+      "hideTimepicker": true,
+      "fiscalYearStartMonth": 0
+    },
+    "title": "SLA Proxy | Live Inspection",
+    "variables": [
+      {
+        "kind": "DatasourceVariable",
+        "spec": {
+          "name": "infinity",
+          "pluginId": "yesoreyeram-infinity-datasource",
+          "refresh": "onDashboardLoad",
+          "regex": "",
+          "current": {
+            "text": "",
+            "value": ""
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Inspection datasource",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": true
+        }
+      },
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "lifecycle",
+          "query": "firing,resolved",
+          "current": {
+            "text": "resolved",
+            "value": "resolved"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Lifecycle",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": false,
+          "valuesFormat": "csv"
+        }
+      },
+      {
+        "kind": "CustomVariable",
+        "spec": {
+          "name": "work_state",
+          "query": "held,due,retry_scheduled,claimed,claim_expired,scheduled",
+          "current": {
+            "text": "scheduled",
+            "value": "scheduled"
+          },
+          "options": [],
+          "multi": false,
+          "includeAll": false,
+          "label": "Delivery work state",
+          "hide": "dontHide",
+          "skipUrlSync": false,
+          "allowCustomValue": false,
+          "valuesFormat": "csv"
+        }
+      }
+    ],
+    "preferences": {
+      "layout": {
+        "kind": "GridLayout",
+        "spec": {
+          "items": []
+        }
+      }
+    }
+  }
+}
