@@ -350,7 +350,7 @@ bounded hint; this does not change `retry_max`. No retry-attempt limit,
 redrive endpoint or sink retirement setting exists. See
 [retry behavior](operations.md#delivery-ordering-and-retries).
 
-See [registry recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset) for registry inspection and recovery.
+See [registry recovery](redis-debugging.md#incomplete-configuration-registry) for registry inspection and recovery.
 
 ## Inbound HTTPS and endpoint authentication
 
