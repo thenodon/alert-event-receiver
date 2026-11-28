@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -14,7 +15,12 @@ import (
 )
 
 const (
+	windowOpen    = "open"
+	windowClosed  = "closed"
+	windowUnknown = "unknown"
+
 	inspectionPath            = "/api/v1/occurrences"
+	inspectionDeliveryPath    = "/api/v1/delivery-work"
 	inspectionScanCount       = 32
 	inspectionScanBudget      = 16
 	inspectionCandidateBudget = 256
@@ -23,7 +29,7 @@ const (
 var inspectionOccurrenceID = regexp.MustCompile("^[a-f0-9]{64}$")
 
 func inspectionPathConflict(path string) bool {
-	if path == inspectionPath {
+	if path == inspectionPath || path == inspectionDeliveryPath {
 		return true
 	}
 	id, ok := strings.CutPrefix(path, inspectionPath+"/")
@@ -40,6 +46,7 @@ func (s *Service) registerInspection(mux *http.ServeMux) {
 	}
 	register(inspectionPath, s.inspectOccurrences)
 	register(inspectionPath+"/{occurrence_id}", s.inspectOccurrence)
+	register(inspectionDeliveryPath, s.inspectDeliveryWork)
 }
 
 type occurrenceView struct {
@@ -56,6 +63,8 @@ type occurrenceBindingView struct {
 	SinkID           string            `json:"sink_id"`
 	Eligibility      EligibilityStatus `json:"eligibility"`
 	Delivery         DeliveryStatus    `json:"delivery"`
+	SLAWindow        string            `json:"sla_window"`
+	SLAWindowReason  string            `json:"sla_window_reason,omitempty"`
 	HoldReason       string            `json:"hold_reason,omitempty"`
 	NextEvaluationAt *time.Time        `json:"next_evaluation_at,omitempty"`
 }
@@ -66,6 +75,7 @@ type occurrenceListItem struct {
 }
 
 type occurrenceDetail struct {
+	AsOf time.Time `json:"as_of"`
 	occurrenceView
 	Version             uint64                    `json:"version"`
 	CreatedAt           time.Time                 `json:"created_at"`
@@ -122,10 +132,36 @@ func inspectionTime(t *time.Time) *time.Time {
 	return utcPointer(*t)
 }
 
-func inspectBinding(b *DurableBinding) occurrenceBindingView {
+func (e *CalendarEngine) inspectionWindow(ctx context.Context, b *DurableBinding, at time.Time) (window, reason string) {
+	policy, ok := e.policies[b.Policy]
+	if !ok {
+		return windowUnknown, "policy_removed"
+	}
+	if policy.version != b.PolicyVersion {
+		return windowUnknown, "policy_changed"
+	}
+	// Evaluate only the current civil date and leave operational metrics to
+	// scheduler and webhook evaluations.
+	calendar := *e
+	calendar.horizonDays, calendar.metrics = 1, nil
+	decision, err := calendar.Evaluate(ctx, PolicyInput{}, b.Policy, b.SinkID, at)
+	if errors.Is(err, errDatasetCoverage) {
+		return windowUnknown, "holiday_coverage_missing"
+	}
+	if err != nil {
+		return windowUnknown, "calendar_error"
+	}
+	if decision.Eligible {
+		return windowOpen, ""
+	}
+	return windowClosed, ""
+}
+
+func (e *CalendarEngine) inspectBinding(ctx context.Context, b *DurableBinding, at time.Time) occurrenceBindingView {
+	window, reason := e.inspectionWindow(ctx, b, at)
 	return occurrenceBindingView{
 		ID: b.ID, SinkID: b.SinkID, Eligibility: b.Eligibility, Delivery: b.Delivery,
-		HoldReason: inspectionHoldReason(b), NextEvaluationAt: utcPointer(b.NextEvaluationAt),
+		SLAWindow: window, SLAWindowReason: reason, HoldReason: inspectionHoldReason(b), NextEvaluationAt: utcPointer(b.NextEvaluationAt),
 	}
 }
 
@@ -162,7 +198,9 @@ func (s *Service) inspectOccurrence(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	asOf := s.now().UTC()
 	result := occurrenceDetail{
+		AsOf:           asOf,
 		occurrenceView: inspectOccurrenceView(row), Version: row.Version,
 		CreatedAt: row.CreatedAt.UTC(), UpdatedAt: row.UpdatedAt.UTC(),
 		LastEvaluatedAt: inspectionTime(row.LastEvaluatedAt), CompletedAt: inspectionTime(row.CompletedAt),
@@ -175,7 +213,7 @@ func (s *Service) inspectOccurrence(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, b := range orderedInspectionBindings(row) {
 		detail := occurrenceBindingDetail{
-			occurrenceBindingView: inspectBinding(b), SLALabel: b.Policy.SLALabel, SLAValue: b.Policy.SLAValue,
+			occurrenceBindingView: s.durable.engine.inspectBinding(ctx, b, asOf), SLALabel: b.Policy.SLALabel, SLAValue: b.Policy.SLAValue,
 			PolicyVersion: b.PolicyVersion, Intents: make([]inspectionIntent, 0, len(b.Intents)),
 		}
 		if b.Claim != nil {
@@ -196,21 +234,28 @@ func (s *Service) inspectOccurrence(w http.ResponseWriter, r *http.Request) {
 		}
 		result.Bindings = append(result.Bindings, detail)
 	}
+	if ctx.Err() != nil {
+		http.Error(w, "occurrence state unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	writeInspectionJSON(w, result)
 }
 
 type inspectionCursor struct {
-	Scope   string   `json:"scope"`
-	Next    uint64   `json:"next"`
-	Pending []string `json:"pending,omitempty"`
+	Scope   string    `json:"scope"`
+	Next    uint64    `json:"next"`
+	Pending []string  `json:"pending,omitempty"`
+	Offset  int       `json:"offset,omitempty"`
+	AsOf    time.Time `json:"as_of"`
 }
 
-type inspectionPage struct {
-	Items      []occurrenceListItem `json:"items"`
-	NextCursor string               `json:"next_cursor,omitempty"`
+type inspectionPage[T any] struct {
+	Items      []T       `json:"items"`
+	NextCursor string    `json:"next_cursor,omitempty"`
+	AsOf       time.Time `json:"as_of"`
 }
 
-func inspectionFilters(raw string) (url.Values, int, bool) {
+func inspectionFilters(raw string, deliveryWork bool) (url.Values, int, bool) {
 	q, err := url.ParseQuery(raw)
 	if err != nil {
 		return nil, 0, false
@@ -222,7 +267,32 @@ func inspectionFilters(raw string) (url.Values, int, bool) {
 		}
 		value := values[0]
 		switch key {
+		case "cursor", "limit", "sink_id":
+		case "action", "state":
+			if !deliveryWork {
+				return nil, 0, false
+			}
+		default:
+			if deliveryWork {
+				return nil, 0, false
+			}
+		}
+		switch key {
 		case "alertname", "fingerprint", "sink_id", "hold_reason", "cursor":
+		case "sla_window":
+			if value != windowOpen && value != windowClosed && value != windowUnknown {
+				return nil, 0, false
+			}
+		case "action":
+			if value != "firing" && value != "resolved" {
+				return nil, 0, false
+			}
+		case "state":
+			switch value {
+			case workDue, workRetryScheduled, workClaimed, workClaimExpired, workHeld, workScheduled:
+			default:
+				return nil, 0, false
+			}
 		case "lifecycle":
 			if value != string(LifecycleFiring) && value != string(LifecycleResolved) {
 				return nil, 0, false
@@ -255,58 +325,89 @@ func matchesInspectionFilter(filter, value string) bool {
 	return filter == "" || filter == value
 }
 
-func matchesInspection(q url.Values, view occurrenceView, row *DurableOccurrence) bool {
+func (s *Service) occurrenceInspectionItems(ctx context.Context, q url.Values, row *DurableOccurrence, asOf time.Time) []occurrenceListItem {
+	view := inspectOccurrenceView(row)
 	if !matchesInspectionFilter(q.Get("lifecycle"), string(view.Lifecycle)) ||
 		!matchesInspectionFilter(q.Get("alertname"), view.AlertName) ||
 		!matchesInspectionFilter(q.Get("fingerprint"), view.Fingerprint) {
-		return false
+		return nil
 	}
-	for _, b := range row.Bindings {
-		if matchesInspectionFilter(q.Get("sink_id"), b.SinkID) &&
-			matchesInspectionFilter(q.Get("eligibility"), string(b.Eligibility)) &&
-			matchesInspectionFilter(q.Get("delivery"), string(b.Delivery)) &&
-			matchesInspectionFilter(q.Get("hold_reason"), inspectionHoldReason(b)) {
-			return true
+	item := occurrenceListItem{occurrenceView: view, Bindings: make([]occurrenceBindingView, 0, len(row.Bindings))}
+	matched := false
+	for _, b := range orderedInspectionBindings(row) {
+		binding := s.durable.engine.inspectBinding(ctx, b, asOf)
+		item.Bindings = append(item.Bindings, binding)
+		if matchesInspectionFilter(q.Get("sink_id"), binding.SinkID) &&
+			matchesInspectionFilter(q.Get("eligibility"), string(binding.Eligibility)) &&
+			matchesInspectionFilter(q.Get("delivery"), string(binding.Delivery)) &&
+			matchesInspectionFilter(q.Get("hold_reason"), binding.HoldReason) &&
+			matchesInspectionFilter(q.Get("sla_window"), binding.SLAWindow) {
+			matched = true
 		}
 	}
-	return false
+	if !matched {
+		return nil
+	}
+	return []occurrenceListItem{item}
 }
 
 func (s *Service) inspectOccurrences(w http.ResponseWriter, r *http.Request) {
-	q, limit, valid := inspectionFilters(r.URL.RawQuery)
-	if !valid {
-		http.Error(w, "invalid occurrence filters", http.StatusBadRequest)
-		return
+	page, ok := readInspectionPage(w, r, s, false, s.occurrenceInspectionItems)
+	if ok {
+		writeInspectionJSON(w, page)
 	}
-	store := s.durable.store
+}
+
+func readInspectionPage[T any](w http.ResponseWriter, r *http.Request, s *Service, deliveryWork bool,
+	items func(context.Context, url.Values, *DurableOccurrence, time.Time) []T) (inspectionPage[T], bool) {
+	var empty inspectionPage[T]
+	q, limit, valid := inspectionFilters(r.URL.RawQuery, deliveryWork)
+	if !valid {
+		http.Error(w, "invalid inspection filters", http.StatusBadRequest)
+		return empty, false
+	}
 	token := q.Get("cursor")
 	q.Del("cursor")
 	q.Del("limit")
-	firing := q.Get("lifecycle") == string(LifecycleFiring)
+	store := s.durable.store
 	scope := tupleID(store.prefix, strconv.Itoa(store.cfg.Valkey.Database), q.Encode())
-	cursor := inspectionCursor{Scope: scope}
+	if deliveryWork {
+		scope = tupleID(inspectionDeliveryPath, scope)
+	}
+	cursor := inspectionCursor{Scope: scope, AsOf: s.now().UTC()}
 	if token != "" {
 		data, err := base64.RawURLEncoding.DecodeString(token)
-		if err != nil || json.Unmarshal(data, &cursor) != nil || cursor.Scope != scope ||
-			(cursor.Next == 0 && len(cursor.Pending) == 0) ||
-			slices.ContainsFunc(cursor.Pending, func(id string) bool { return !inspectionOccurrenceID.MatchString(id) }) {
-			http.Error(w, "invalid occurrence cursor", http.StatusBadRequest)
-			return
+		var resumed inspectionCursor
+		if err != nil || json.Unmarshal(data, &resumed) != nil || resumed.Scope != scope ||
+			resumed.Offset < 0 || (!deliveryWork && resumed.Offset != 0) ||
+			(len(resumed.Pending) == 0 && (resumed.Next == 0 || resumed.Offset != 0)) ||
+			slices.ContainsFunc(resumed.Pending, func(id string) bool { return !inspectionOccurrenceID.MatchString(id) }) {
+			http.Error(w, "invalid inspection cursor", http.StatusBadRequest)
+			return empty, false
 		}
+		if resumed.AsOf.IsZero() {
+			resumed.AsOf = cursor.AsOf // Phase 1 cursors have no timestamp.
+		}
+		resumed.AsOf = resumed.AsOf.UTC()
+		cursor = resumed
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), s.cfg.Durable.Scheduler.OperationTimeout)
 	defer cancel()
-	page, err := store.inspectPage(ctx, q, firing, limit, cursor, token == "")
+	firing := q.Get("lifecycle") == string(LifecycleFiring)
+	page, err := inspectPage(ctx, store, firing, limit, cursor, token == "", func(row *DurableOccurrence) []T {
+		return items(ctx, q, row, cursor.AsOf)
+	})
 	if err != nil {
 		http.Error(w, "occurrence state unavailable", http.StatusServiceUnavailable)
-		return
+		return empty, false
 	}
-	writeInspectionJSON(w, page)
+	return page, true
 }
 
-func (s *DurableStore) inspectPage(ctx context.Context, q url.Values, firing bool, limit int, cursor inspectionCursor, initial bool) (inspectionPage, error) {
-	page := inspectionPage{Items: make([]occurrenceListItem, 0, limit)}
-	if err := s.checkSchema(ctx, s.client); err != nil {
+func inspectPage[T any](ctx context.Context, store *DurableStore, firing bool, limit int, cursor inspectionCursor,
+	initial bool, inspect func(*DurableOccurrence) []T) (inspectionPage[T], error) {
+	page := inspectionPage[T]{Items: make([]T, 0, limit), AsOf: cursor.AsOf}
+	if err := store.checkSchema(ctx, store.client); err != nil {
 		return page, err
 	}
 	candidates, scans := 0, 0
@@ -315,7 +416,7 @@ func (s *DurableStore) inspectPage(ctx context.Context, q url.Values, firing boo
 			if (!initial && cursor.Next == 0) || scans == inspectionScanBudget {
 				break
 			}
-			ids, next, err := s.scanInspection(ctx, firing, cursor.Next)
+			ids, next, err := store.scanInspection(ctx, firing, cursor.Next)
 			if err != nil {
 				return page, err
 			}
@@ -324,31 +425,29 @@ func (s *DurableStore) inspectPage(ctx context.Context, q url.Values, firing boo
 			initial = false
 			continue
 		}
-		id := cursor.Pending[0]
-		cursor.Pending = cursor.Pending[1:]
-		candidates++
-		row, err := s.load(ctx, id)
+		row, err := store.load(ctx, cursor.Pending[0])
 		if err != nil {
 			return page, err
 		}
-		if row == nil {
-			continue
+		candidates++
+		if row != nil {
+			items := inspect(row)
+			if cursor.Offset < len(items) {
+				end := min(len(items), cursor.Offset+limit-len(page.Items))
+				page.Items = append(page.Items, items[cursor.Offset:end]...)
+				if end < len(items) {
+					cursor.Offset = end
+					break
+				}
+			}
 		}
-		view := inspectOccurrenceView(row)
-		if !matchesInspection(q, view, row) {
-			continue
-		}
-		item := occurrenceListItem{occurrenceView: view, Bindings: make([]occurrenceBindingView, 0, len(row.Bindings))}
-		for _, b := range orderedInspectionBindings(row) {
-			item.Bindings = append(item.Bindings, inspectBinding(b))
-		}
-		page.Items = append(page.Items, item)
+		cursor.Pending, cursor.Offset = cursor.Pending[1:], 0
 	}
 	if err := ctx.Err(); err != nil {
 		return page, err
 	}
 	if cursor.Next != 0 || len(cursor.Pending) != 0 {
-		// SCAN's COUNT is a hint. Preserve the unconsumed page across requests.
+		// SCAN's COUNT is a hint. Preserve unconsumed candidates and item offset.
 		data, err := json.Marshal(cursor)
 		if err != nil {
 			return page, err

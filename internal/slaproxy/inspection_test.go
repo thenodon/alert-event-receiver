@@ -53,16 +53,16 @@ func TestInspectionAPI(t *testing.T) {
 		t.Helper()
 		return request(path, "operator", "inspect-secret", want)
 	}
-	list := func(query string) inspectionPage {
+	list := func(query string) inspectionPage[occurrenceListItem] {
 		t.Helper()
-		var page inspectionPage
+		var page inspectionPage[occurrenceListItem]
 		w := get(inspectionPath+"?"+query, http.StatusOK)
 		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil || page.Items == nil {
 			t.Fatalf("invalid inspection page: %v %s", err, w.Body)
 		}
 		return page
 	}
-	for _, path := range []string{inspectionPath, inspectionPath + "/" + strings.Repeat("a", 64)} {
+	for _, path := range []string{inspectionPath, inspectionPath + "/" + strings.Repeat("a", 64), inspectionDeliveryPath} {
 		if challenge := request(path, "", "", http.StatusUnauthorized).Header().Get("WWW-Authenticate"); challenge != `Basic realm="inspection"` {
 			t.Fatal(challenge)
 		}
@@ -185,6 +185,12 @@ func TestInspectionAPI(t *testing.T) {
 	checkHolds(bindings)
 	if strings.Count(detail.Body.String(), `"hold_reason"`) != 1 {
 		t.Fatal(detail.Body.String())
+	}
+	var work inspectionPage[deliveryWorkItem]
+	w := get(inspectionDeliveryPath+"?action=resolved&state=held", http.StatusOK)
+	if err := json.Unmarshal(w.Body.Bytes(), &work); err != nil || len(work.Items) != 1 ||
+		work.Items[0].SinkID != "servicenow" || work.Items[0].Action != "resolved" {
+		t.Fatalf("completed resolution must not appear as held work: %v %s", err, w.Body)
 	}
 
 	if _, err := s.durable.store.update(context.Background(), id, func(row *DurableOccurrence, _ time.Time) (*DurableOccurrence, error) {

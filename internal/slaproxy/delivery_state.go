@@ -74,16 +74,20 @@ func (b *DurableBinding) deliveryDueAt(row *DurableOccurrence) time.Time {
 		if !deliveryActionable(row, b, i) {
 			continue
 		}
-		at := i.NextAttemptAt
-		if at.IsZero() {
-			at = i.CreatedAt
-		}
+		at := i.dueAt()
 		if due.IsZero() || at.Before(due) {
 			due = at
 		}
 	}
 	return due
 }
+func (i *DeliveryIntent) dueAt() time.Time {
+	if i.NextAttemptAt.IsZero() {
+		return i.CreatedAt
+	}
+	return i.NextAttemptAt
+}
+
 func deliveryActionable(row *DurableOccurrence, b *DurableBinding, i *DeliveryIntent) bool {
 	if i == nil || !i.Ready || i.Canceled || i.PermanentFailure || i.Receipt != nil || b.HoldReason != "" {
 		return false
