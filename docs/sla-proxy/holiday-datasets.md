@@ -244,7 +244,7 @@ flowchart TD
 
 Starting a changed policy at the same epoch is rejected; old instances are fenced after activation. Increasing the epoch activates the change, not migration or redrive.
 
-Affected existing bindings become `policy_changed` holds, preserving original stored calendar decisions, intent IDs and receipts. Unrelated policies remain unchanged. No automatic reinterpretation, migration or historical sink backfill occurs. Holds can affect unresolved work, outstanding authorized recovery and resolutions awaiting receipts. A previously authorized remote call can still complete during rollout; at-least-once ambiguity and firing-before-resolved ordering are unchanged.
+Affected existing bindings become `policy_changed` holds, preserving original stored calendar decisions, [delivery intent](concepts.md#delivery-lifecycle) IDs and receipts. Unrelated policies remain unchanged. No automatic reinterpretation, migration or historical sink backfill occurs. Holds can affect unresolved work, outstanding authorized recovery and resolutions awaiting receipts. A previously authorized remote call can still complete during rollout; at-least-once ambiguity and firing-before-resolved ordering are unchanged.
 
 ### Rollback and held work
 

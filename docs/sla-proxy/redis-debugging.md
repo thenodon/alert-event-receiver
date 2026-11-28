@@ -12,7 +12,22 @@ This guide covers durable modes of `alert-sla-proxy`. Observe-only mode does not
 
 Examples use database `0` and `durable.valkey.namespace: sla`. Substitute the configured endpoint, database and namespace, and use deployment-approved TLS and authentication. `redis-cli` and `valkey-cli` support the commands shown here.
 
-A namespace is an application-defined grouping of keys, not a native Valkey isolation or access-control mechanism. The prefix `sla:{sla}:` consists of the configured namespace, the literal hash tag `{sla}`, and a suffix. The hash tag co-locates transaction keys in a Cluster slot; it does not imply support for Cluster discovery, MOVED handling or Sentinel failover. The client uses a single primary endpoint.
+The proxy builds each key as `<namespace>:{sla}:<suffix>`. Replace
+`<namespace>` with `durable.valkey.namespace`. Keep `{sla}` and its braces
+literally. For example, with namespace `prod-alerts`, the scheduler key is
+`prod-alerts:{sla}:due` and the ServiceNow queue key is
+`prod-alerts:{sla}:delivery-pending:servicenow`.
+
+The namespace groups application keys within the selected Valkey database.
+The fixed hash tag `{sla}` co-locates transaction keys in a Cluster slot. The
+client uses a single primary endpoint without Cluster discovery, MOVED
+handling, or Sentinel failover.
+
+The durable proxy uses two background tasks. The **SLA scheduler**
+rechecks firing alerts when their SLA window opens. The **delivery
+dispatcher** runs when delivery is enabled and sends ready notifications to
+their configured sinks, retrying when appropriate. The indexes help these
+processes find work and track its state.
 
 ```mermaid
 flowchart TD
@@ -87,7 +102,8 @@ The registry is append-only. Existing IDs must retain their fingerprints. Changi
 
 ## Occurrences, indexes and leases
 
-All suffixes below use `sla:{sla}:` as prefix.
+The key examples below use the default namespace `sla`. Add the prefix
+`<namespace>:{sla}:` to any entry shown as a suffix.
 
 ### Authoritative records and identity
 
@@ -117,34 +133,94 @@ Dashed arrows illustrate discovery references, not simultaneous memberships or g
 
 ### Scheduler and lifecycle indexes
 
-| Suffix | Type | Purpose |
+These indexes track whole alert occurrences. The scheduler polls `due` to
+find occurrences that need an SLA recheck or have an expired scheduler
+claim. The sets track lifecycle and intent state.
+
+| Full key | Type | Purpose |
 |---|---|---|
-| `due` | Sorted set | Scheduler work or claim recovery |
-| `unresolved` | Set | Known-firing occurrences |
-| `pending` | Set | Firing occurrences with pending SLA binding |
-| `held` | Set | Lifecycle/policy binding holds |
-| `intent-index` | Set | Occurrences with ready uncanceled intents; not receipts or a due-only queue |
+| `<namespace>:{sla}:due` | Sorted set | Next SLA recheck or scheduler claim recovery |
+| `<namespace>:{sla}:unresolved` | Set | Occurrences known to be firing |
+| `<namespace>:{sla}:pending` | Set | Firing occurrences with a binding waiting for its SLA window |
+| `<namespace>:{sla}:held` | Set | Occurrences with a binding on hold |
+| `<namespace>:{sla}:intent-index` | Set | Occurrences with ready, uncanceled delivery intents |
+
+An occurrence enters `unresolved` when the proxy accepts it as firing and
+leaves when the proxy accepts a matching resolved notification. It can be
+in this set while waiting for an SLA opening, on hold, or after a successful
+firing delivery. If the resolved notification never arrives, the occurrence
+remains known as firing.
+
+An occurrence is in `held` when at least one sink binding has a nonempty
+`hold_reason`. A hold pauses SLA scheduling and new delivery attempts for
+that binding. Check the occurrence JSON for the reason. It can indicate a
+missing or changed pinned policy, a missing or changed destination,
+conflicting resolution timestamps, or no SLA opening within the stored
+calendar search horizon.
+
+The proxy updates `held` when it updates or reconciles the occurrence.
+The ID drops out when all binding holds clear, for example during
+reconciliation after restoring the exact pinned policy. A resolved webhook
+can clear a search-horizon hold, while a policy mismatch can persist after
+resolution.
+
+A [delivery intent](concepts.md#delivery-lifecycle) is a work item the proxy
+stores in Valkey on an occurrence’s sink binding for a firing or resolved
+notification. An occurrence is in `intent-index` when any of its
+bindings has an intent with `ready: true` and `canceled: false`. The
+ID leaves once no intent meets both conditions, for example after the last
+ready intent gets a delivery receipt or is canceled. A ready intent can
+still be waiting for its retry deadline. Use `delivery-due` to check when
+work for a specific binding is scheduled.
 
 ### Delivery indexes
 
-| Suffix | Type | Purpose |
-|---|---|---|
-| `delivery-due` | Sorted set | Delivery/retry or expired-claim recovery |
-| `delivery-ready` | Set | Queued binding work including retry delay without active claim |
-| `delivery-claimed` | Set | Persisted claims including expired claims awaiting recovery |
-| `delivery-held` | Set | Permanent failures or policy/destination holds |
-| `delivery-pending:<sink_id>` | Set | Queued work for one sink including retry delay |
-| `delivery-inflight:<sink_id>` | Set | Persisted claims for one sink |
-| `delivery-failed:<sink_id>` | Set | Held bindings for one sink |
+These indexes track work for each occurrence and sink binding. The dispatcher
+polls `delivery-due` to find sends, retries and expired delivery claims.
+Replace `<sink_id>` with the configured sink ID, such as `servicenow`.
 
-Delivery-index members are `<occurrence_id>:<binding_id>`; lifecycle indexes use occurrence IDs. Sorted-set scores are Unix epoch milliseconds rounded up for fractional milliseconds, preventing premature execution. JSON retains exact timestamps. A due score may represent lease expiry rather than SLA opening. Index membership does not establish external delivery.
+| Full key | Type | Purpose |
+|---|---|---|
+| `<namespace>:{sla}:delivery-due` | Sorted set | Next send, retry or delivery claim recovery |
+| `<namespace>:{sla}:delivery-ready` | Set | Queued binding work without an active claim, including delayed retries |
+| `<namespace>:{sla}:delivery-claimed` | Set | Persisted delivery claims, including expired claims awaiting recovery |
+| `<namespace>:{sla}:delivery-held` | Set | Bindings with permanent failures or policy or destination holds |
+| `<namespace>:{sla}:delivery-pending:<sink_id>` | Set | Queued work for one sink, including delayed retries |
+| `<namespace>:{sla}:delivery-inflight:<sink_id>` | Set | Persisted delivery claims for one sink |
+| `<namespace>:{sla}:delivery-failed:<sink_id>` | Set | Held bindings for one sink |
+
+Delivery-index members are `<occurrence_id>:<binding_id>`. The scheduler and
+lifecycle indexes use occurrence IDs. Sorted-set scores are Unix epoch
+milliseconds rounded up for fractional milliseconds to prevent premature
+execution. JSON retains exact timestamps. Check the receipt in the
+occurrence record to confirm successful sink delivery.
 
 ### Claims and leases
 
-| Suffix | Type | Purpose |
+The delivery indexes help workers find work. A **claim** gives one worker
+temporary ownership of that work. The **lease** is the time until that
+ownership expires. For delivery, the claim applies to one occurrence and
+sink binding. The SLA scheduler uses a separate claim for rechecking the
+whole occurrence.
+
+For example, when a ServiceNow notification is due:
+
+1. A delivery worker finds the binding in `delivery-due` and claims it
+   before attempting the send. The proxy stores a claim in the occurrence
+   record and writes an expiring `delivery-claim` key with the worker's
+   ownership token.
+2. The binding appears in `delivery-claimed` and
+   `delivery-inflight:servicenow`. Its score in `delivery-due` now marks
+   the lease expiry.
+3. If the worker records the outcome, the claim is released. A successful
+   send gets a receipt. A retryable failure gets a new due time. If the
+   worker stops before recording the outcome, another worker can recover
+   the work after the lease expires.
+
+| Full key | Type | Purpose |
 |---|---|---|
-| `claim:<occurrence_id>` | Expiring string | Scheduler ownership token with matching fence/deadline in occurrence |
-| `delivery-claim:<occurrence_id>:<binding_id>` | Expiring string | Delivery ownership token |
+| `<namespace>:{sla}:claim:<occurrence_id>` | Expiring string | Ownership token for an SLA recheck |
+| `<namespace>:{sla}:delivery-claim:<occurrence_id>:<binding_id>` | Expiring string | Delivery ownership token |
 
 ```mermaid
 sequenceDiagram
@@ -165,9 +241,9 @@ Expiry permits recovery; it does not prove external I/O failed. A persisted clai
 
 ### Retention and index behavior
 
-| Suffix | Type | Purpose |
+| Full key | Type | Purpose |
 |---|---|---|
-| `retention` | Sorted set | Occurrences due for payload compaction or tombstone deletion |
+| `<namespace>:{sla}:retention` | Sorted set | Occurrences due for payload compaction or tombstone deletion |
 
 Occurrence/control keys normally have `TTL = -1`. Maintenance uses `retention`, not native row TTL. Unresolved records do not expire automatically. Defaults are 30 days for resolved payload and 90 days for tombstone retention, both measured from first durable resolution acceptance. Stored deadlines are `compact_at` and `delete_at`.
 

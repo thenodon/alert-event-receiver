@@ -65,15 +65,28 @@ Inspect `mode`, `selected`, `skipped`, `persisted_count` and `failed_count` in t
 
 ## Investigate an occurrence
 
+Use the [inspection API](reference.md#occurrence-inspection) to find stored
+occurrences by alert name, lifecycle or sink state. Fetch an occurrence by ID
+to inspect its per-sink holds, retries and receipts. For example, a query for
+`lifecycle=firing&sink_id=servicenow&delivery=delivery_failed` lists firing
+occurrences with a failed ServiceNow binding.
+
+Use `sla_window=closed` to find bindings outside their current SLA window.
+Use the [delivery-work API](reference.md#delivery-work-inspection) to find
+specific retries, held intents or expired leases behind a metric. Its
+`occurrence_url` leads to the full per-sink state and receipts.
+
+Each sink binding can have separate firing and resolved [delivery intents](concepts.md#delivery-lifecycle) stored by the proxy.
+
 ```mermaid
 flowchart TD
     A[Fingerprint plus starts_at] --> B[Occurrence ID]
     B --> C[Binding: ServiceNow]
     B --> D[Binding: Log]
     C --> E[Firing intent]
-    C --> F[Resolution intent]
+    C --> F[Resolved intent]
     D --> G[Firing intent]
-    D --> H[Resolution intent]
+    D --> H[Resolved intent]
     E --> I[Attempts and receipt]
     F --> J[Attempts and receipt]
     G --> K[Attempts and receipt]

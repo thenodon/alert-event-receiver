@@ -87,9 +87,8 @@ default to empty. They are environment variables, **not YAML settings**.
 An entirely empty pair disables that feature. Partial or invalid pairs,
 and missing referenced passwords, **fail startup**.
 
-HTTPS uses the existing listener and port. `/healthz` bypasses Basic
-Authentication but still uses HTTPS when TLS is enabled. The event receiver
-has **no `/readyz` endpoint**.
+HTTPS uses the existing listener and port. Both `/healthz` and `/readyz`
+bypass Basic Authentication and use HTTPS when TLS is enabled.
 
 Restart after changing credentials or certificates. Basic Authentication
 over cleartext HTTP is unsafe on untrusted networks; use HTTPS or an

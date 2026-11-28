@@ -199,7 +199,7 @@ are needed whenever durable mode is enabled.
 
 | Key | Type | Default | Purpose / constraints | Level |
 |---|---|---|---|---|
-| `sla_definitions` | ordered list | required for observe-only | At least one definition; durable modes allow an empty list to retain known resolutions after policy removal | Required |
+| `sla_definitions` | ordered list | required for reobserve-only | At least one definition; durable modes allow an empty list to retain known resolutions after policy removal | Required |
 | `sla_definitions[].sla_label` | string | none | Unique selector label matching `[a-zA-Z_][a-zA-Z0-9_]*`; no implicit `sla_id` | Required |
 | `sla_definitions[].slas` | map | none | Nonempty map of nonblank policy names, scoped to this definition | Required |
 | `slas.<name>.timezone` | string | none | Explicit IANA zone, including `UTC`; `Local` rejected; zone data embedded | Required |
@@ -290,7 +290,7 @@ add destinations to old occurrences.
 | `http.timeout` | duration | none | Positive and no greater than dispatcher delivery timeout | Required for HTTP |
 | `http.basic_auth.username` | string | absent | Literal or exact `${NAME}`; provide with password | Common when authenticated |
 | `http.basic_auth.password` | string | absent | Literal or exact `${NAME}`; provide with username | Common when authenticated |
-| `http.idempotency_key` | boolean | `true` | Send stable intent ID in Idempotency-Key; destination deduplication is not assumed | Advanced |
+| `http.idempotency_key` | boolean | `true` | Send the stable [delivery intent](concepts.md#delivery-lifecycle) ID in `Idempotency-Key`; destination deduplication is not assumed | Advanced |
 
 Both auth fields may be absent for an unauthenticated destination. Otherwise
 each must resolve nonempty when delivery is enabled. Username cannot contain
@@ -350,7 +350,7 @@ bounded hint; this does not change `retry_max`. No retry-attempt limit,
 redrive endpoint or sink retirement setting exists. See
 [retry behavior](operations.md#delivery-ordering-and-retries).
 
-See [registry recovery](redis-debugging.md#incomplete-registry-corruption-and-development-reset) for registry inspection and recovery.
+See [registry recovery](redis-debugging.md#incomplete-configuration-registry) for registry inspection and recovery.
 
 ## Inbound HTTPS and endpoint authentication
 
@@ -366,7 +366,19 @@ default). These are not YAML settings:
 | `HTTP_TLS_CERT_FILE` | PEM server certificate chain path |
 | `HTTP_TLS_KEY_FILE` | Matching PEM private-key path |
 
-An entirely empty pair disables that feature; partial/invalid pairs and missing
+The SLA proxy also accepts an independent credential pair for its durable-mode
+[inspection API](reference.md#occurrence-inspection).
+
+| Variable | Purpose |
+|---|---|
+| `HTTP_INSPECTION_BASIC_AUTH_USERNAME` | Inspection username |
+| `HTTP_INSPECTION_BASIC_AUTH_PASSWORD_ENV` | Name of the environment variable holding its password |
+
+The inspection routes are available in durable modes. Leave both settings
+empty for unauthenticated access, or supply both to require Basic Auth.
+Use a different credential pair from webhook and metrics.
+
+An entirely empty pair disables the corresponding authentication or TLS setting. Partial or invalid pairs and missing
 referenced passwords fail startup. HTTPS uses the existing listener and port.
 Health/readiness routes bypass authentication but still use the listener protocol.
 Restart for security changes. Basic Auth over cleartext HTTP is unsafe on untrusted

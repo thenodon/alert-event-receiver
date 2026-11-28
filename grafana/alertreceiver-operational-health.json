@@ -2,9 +2,9 @@
   "apiVersion": "dashboard.grafana.app/v2",
   "kind": "Dashboard",
   "metadata": {
-    "name": "alertreceiver-v020-health",
-    "generation": 1,
-    "creationTimestamp": "2026-11-07T21:41:47Z",
+    "name": "alertreceiver-operational-health",
+    "generation": 2,
+    "creationTimestamp": "2026-11-27T11:32:35Z",
     "labels": {},
     "annotations": {}
   },
@@ -17,24 +17,18 @@
             "kind": "DataQuery",
             "group": "grafana",
             "version": "v0",
-            "spec": {},
-            "labels": {
-              "grafana.app/export-label": "grafana-1"
-            }
+            "spec": {}
           },
           "enable": true,
           "hide": true,
           "iconColor": "rgba(0, 211, 255, 1)",
           "name": "Annotations & Alerts",
-          "builtIn": true,
-          "legacyOptions": {
-            "type": "dashboard"
-          }
+          "builtIn": true
         }
       }
     ],
     "cursorSync": "Crosshair",
-    "description": "Operational overview of alert-event-receiver v0.2.0. Metrics represent best-effort lifecycle processing and OTLP exporter calls; no confirmed backend persistence. SDK queue-drop warnings require log monitoring.",
+    "description": "Operational overview of alert-event-receiver Metrics represent best-effort lifecycle processing and OTLP exporter calls; no confirmed backend persistence. SDK queue-drop warnings require log monitoring.",
     "editable": true,
     "elements": {
       "panel-1": {
@@ -66,7 +60,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -81,13 +75,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -95,7 +90,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -104,7 +101,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "red"
                       },
                       {
@@ -152,7 +149,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -167,7 +164,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -175,9 +172,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -189,7 +188,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -200,6 +199,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -237,7 +270,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -252,7 +285,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -260,9 +293,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -274,7 +309,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -285,6 +320,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -322,7 +391,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -337,7 +406,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -345,9 +414,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -359,7 +430,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -370,6 +441,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -407,7 +512,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -422,7 +527,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -430,9 +535,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -444,7 +551,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -455,6 +562,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -492,7 +633,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -507,7 +648,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -515,9 +656,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -529,7 +672,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -540,6 +683,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -577,7 +754,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -592,7 +769,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -600,9 +777,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -614,7 +793,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -625,6 +804,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -662,7 +875,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -677,7 +890,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -685,9 +898,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -699,7 +914,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -710,6 +925,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -747,7 +996,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -762,7 +1011,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -770,9 +1019,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -784,7 +1035,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -795,6 +1046,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -832,7 +1117,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -847,13 +1132,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -861,7 +1147,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -870,7 +1158,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -918,7 +1206,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -933,7 +1221,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -941,9 +1229,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -955,7 +1245,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -966,6 +1256,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1003,7 +1327,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1018,7 +1342,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1026,9 +1350,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1040,7 +1366,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1051,6 +1377,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1088,7 +1448,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1113,7 +1473,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "B",
@@ -1128,7 +1488,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1136,9 +1496,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1150,7 +1512,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1161,6 +1523,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1198,7 +1594,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1213,7 +1609,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1221,9 +1617,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1235,7 +1633,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1246,6 +1644,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1283,7 +1715,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1298,7 +1730,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1306,9 +1738,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1320,7 +1754,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1331,6 +1765,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1368,7 +1836,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1393,7 +1861,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "B",
@@ -1408,7 +1876,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1416,9 +1884,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1430,7 +1900,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1441,6 +1911,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1478,7 +1982,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1493,7 +1997,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1501,9 +2005,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1515,7 +2021,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1526,6 +2032,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1563,7 +2103,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1578,7 +2118,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1586,9 +2126,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1600,7 +2142,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1611,6 +2153,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1648,7 +2224,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1663,7 +2239,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1671,9 +2247,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1685,7 +2263,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1696,6 +2274,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1733,7 +2345,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1748,13 +2360,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -1762,7 +2375,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -1771,7 +2386,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1819,7 +2434,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1834,7 +2449,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -1842,9 +2457,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -1856,7 +2473,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1867,6 +2484,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -1904,7 +2555,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -1919,13 +2570,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -1933,7 +2585,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -1942,7 +2596,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -1990,7 +2644,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -2005,13 +2659,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -2019,7 +2674,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -2028,7 +2685,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -2076,7 +2733,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -2091,13 +2748,14 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "stat",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "colorMode": "background",
                 "graphMode": "area",
                 "justifyMode": "auto",
                 "orientation": "auto",
+                "percentChangeColorMode": "standard",
                 "reduceOptions": {
                   "calcs": [
                     "lastNotNull"
@@ -2105,7 +2763,9 @@
                   "fields": "",
                   "values": false
                 },
-                "textMode": "auto"
+                "showPercentChange": false,
+                "textMode": "auto",
+                "wideLayout": true
               },
               "fieldConfig": {
                 "defaults": {
@@ -2114,7 +2774,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -2162,7 +2822,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -2177,7 +2837,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -2185,9 +2845,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -2199,7 +2861,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -2210,6 +2872,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -2247,7 +2943,7 @@
                       },
                       "labels": {
                         "grafana.app/export-label": "prometheus-1",
-                        "grafana.app/export-datasource-name": "${datasource}"
+                        "grafana.app/export-datasource-name": "prometheus"
                       }
                     },
                     "refId": "A",
@@ -2262,7 +2958,7 @@
           "vizConfig": {
             "kind": "VizConfig",
             "group": "timeseries",
-            "version": "",
+            "version": "13.3.2",
             "spec": {
               "options": {
                 "legend": {
@@ -2270,9 +2966,11 @@
                     "lastNotNull"
                   ],
                   "displayMode": "table",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "showLegend": true
                 },
                 "tooltip": {
+                  "hideZeros": false,
                   "mode": "multi",
                   "sort": "desc"
                 }
@@ -2284,7 +2982,7 @@
                     "mode": "absolute",
                     "steps": [
                       {
-                        "value": null,
+                        "value": 0,
                         "color": "green"
                       },
                       {
@@ -2295,6 +2993,40 @@
                   },
                   "color": {
                     "mode": "palette-classic"
+                  },
+                  "custom": {
+                    "axisBorderShow": false,
+                    "axisCenteredZero": false,
+                    "axisColorMode": "text",
+                    "axisLabel": "",
+                    "axisPlacement": "auto",
+                    "barAlignment": 0,
+                    "barWidthFactor": 0.6,
+                    "drawStyle": "line",
+                    "fillOpacity": 0,
+                    "gradientMode": "none",
+                    "hideFrom": {
+                      "legend": false,
+                      "tooltip": false,
+                      "viz": false
+                    },
+                    "insertNulls": false,
+                    "lineInterpolation": "linear",
+                    "lineWidth": 1,
+                    "pointSize": 5,
+                    "scaleDistribution": {
+                      "type": "linear"
+                    },
+                    "showPoints": "auto",
+                    "showValues": false,
+                    "spanNulls": false,
+                    "stacking": {
+                      "group": "A",
+                      "mode": "none"
+                    },
+                    "thresholdsStyle": {
+                      "mode": "off"
+                    }
                   }
                 },
                 "overrides": []
@@ -2335,7 +3067,7 @@
                       "kind": "GridLayoutItem",
                       "spec": {
                         "x": 4,
-                        "y": 1,
+                        "y": 0,
                         "width": 4,
                         "height": 4,
                         "element": {
@@ -2348,7 +3080,7 @@
                       "kind": "GridLayoutItem",
                       "spec": {
                         "x": 8,
-                        "y": 1,
+                        "y": 0,
                         "width": 4,
                         "height": 4,
                         "element": {
@@ -2361,7 +3093,7 @@
                       "kind": "GridLayoutItem",
                       "spec": {
                         "x": 12,
-                        "y": 1,
+                        "y": 0,
                         "width": 4,
                         "height": 4,
                         "element": {
@@ -2374,7 +3106,7 @@
                       "kind": "GridLayoutItem",
                       "spec": {
                         "x": 16,
-                        "y": 1,
+                        "y": 0,
                         "width": 4,
                         "height": 4,
                         "element": {
@@ -2387,7 +3119,7 @@
                       "kind": "GridLayoutItem",
                       "spec": {
                         "x": 20,
-                        "y": 1,
+                        "y": 0,
                         "width": 4,
                         "height": 4,
                         "element": {
@@ -2750,7 +3482,7 @@
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
     },
-    "title": "Alert Event Receiver | Service Health & Delivery (v0.2.0)",
+    "title": "Alert Event Receiver | Service Health & Delivery ",
     "variables": [
       {
         "kind": "DatasourceVariable",
@@ -2792,17 +3524,19 @@
               "name": "${datasource}"
             },
             "spec": {
-              "query": "label_values(alertreceiver_webhook_requests_total, job)",
-              "refId": "job"
+              "qryType": 1,
+              "query": "label_values(alertreceiver_resolved_orphans_total,job)",
+              "refId": "PrometheusVariableQueryEditor-VariableQuery"
             },
             "labels": {
               "grafana.app/export-label": "prometheus-1",
-              "grafana.app/export-datasource-name": "${datasource}"
+              "grafana.app/export-datasource-name": "prometheus"
             }
           },
           "regex": "",
+          "regexApplyTo": "value",
           "sort": "alphabeticalAsc",
-          "definition": "label_values(alertreceiver_webhook_requests_total, job)",
+          "definition": "label_values(alertreceiver_resolved_orphans_total,job)",
           "options": [],
           "multi": true,
           "includeAll": true,
@@ -2835,10 +3569,11 @@
             },
             "labels": {
               "grafana.app/export-label": "prometheus-1",
-              "grafana.app/export-datasource-name": "${datasource}"
+              "grafana.app/export-datasource-name": "prometheus"
             }
           },
           "regex": "",
+          "regexApplyTo": "value",
           "sort": "alphabeticalAsc",
           "definition": "label_values(up{job=~\"$job\"}, instance)",
           "options": [],

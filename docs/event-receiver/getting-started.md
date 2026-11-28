@@ -76,15 +76,15 @@ Keep this terminal open while testing. These settings also appear in
 [event-receiver.env](../examples/event-receiver.env). For gRPC, TLS or
 other backends, see [configuration](configuration.md).
 
-From another terminal, check the receiver's health endpoint:
+From another terminal, check HTTP liveness and Valkey readiness:
 
 ```bash
 curl -fsS http://127.0.0.1:9011/healthz
+curl -fsS http://127.0.0.1:9011/readyz
 ```
 
-A successful response confirms that the HTTP listener is alive. **It does
-not verify ongoing Valkey or OTLP backend readiness.** The event receiver
-has no separate readiness endpoint.
+The readiness endpoint returns `200` when Valkey responds to a ping. Verify
+OTLP delivery by sending a test webhook and inspecting the backend.
 
 ## 3. Send firing and resolved notifications
 

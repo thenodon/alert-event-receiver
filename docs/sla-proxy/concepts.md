@@ -7,7 +7,7 @@ The SLA proxy controls when alerts qualify for notification under an SLA calenda
 | Mode | Behavior |
 |---|---|
 | Observe-only | Select policies and evaluate notification evidence. No Valkey state, scheduling or sink calls. |
-| Durable-state-only | Persist occurrences, eligibility, scheduling and delivery intents in Valkey without contacting destinations. |
+| Durable-state-only | Persist occurrences, eligibility, scheduling and [delivery intents](#delivery-lifecycle) in Valkey without contacting destinations. |
 | Durable delivery | Additionally dispatch authorized notifications asynchronously and record delivery receipts. |
 
 A successful webhook response confirms observation or durable acceptance, depending on the mode. It does not confirm downstream delivery.
@@ -151,7 +151,7 @@ If resolution had arrived before authorization, the proxy would not authorize fi
 
 A destination is a named HTTP or log sink. At first durable acceptance the occurrence freezes all configured destinations, including when pending or in state-only mode. New destinations apply only to new occurrences. There is no SLA-dependent destination routing.
 
-Each destination has its own binding, intents, authorization, attempts and receipts.
+For each occurrence, the proxy tracks delivery intents, authorization, attempts and receipts separately on each sink binding.
 
 ```mermaid
 flowchart TD
@@ -167,7 +167,7 @@ A failure at one destination does not erase another's success.
 
 ### Delivery lifecycle
 
-A delivery intent is prepared work. Authorization is the durable decision permitting first firing delivery. A successful sink call establishes acceptance at the sink boundary; a receipt records that success separately in Valkey.
+A **delivery intent** is a work item the proxy stores in Valkey for a firing or resolved notification to a specific sink. It belongs to the occurrence’s binding for that sink. Authorization is the durable decision permitting first firing delivery. After a successful sink call, the proxy records a delivery receipt in Valkey.
 
 ```mermaid
 flowchart TD

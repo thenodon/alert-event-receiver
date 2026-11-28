@@ -19,9 +19,10 @@ import (
 // Config is an immutable startup snapshot. Its zero value means HTTP/no auth.
 // Credentials are retained only as fixed-size digests; do not log configuration.
 type Config struct {
-	webhook credentials
-	metrics credentials
-	tls     *tls.Config
+	webhook    credentials
+	metrics    credentials
+	inspection credentials
+	tls        *tls.Config
 }
 
 type credentials struct {
@@ -34,6 +35,22 @@ var envName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 // LoadFromEnv validates all six shared HTTP_* settings and resolves referenced
 // passwords and certificate files before the caller starts any listeners.
 func LoadFromEnv() (Config, error) { return load(os.LookupEnv) }
+
+// LoadWithInspectionFromEnv also validates the SLA proxy's inspection credentials.
+func LoadWithInspectionFromEnv() (Config, error) {
+	c, err := LoadFromEnv()
+	if err != nil {
+		return Config{}, err
+	}
+	c.inspection, err = loadCredentials(os.LookupEnv, "HTTP_INSPECTION_BASIC_AUTH_")
+	if err != nil {
+		return Config{}, err
+	}
+	if c.inspection.enabled && (c.inspection == c.webhook || c.inspection == c.metrics) {
+		return Config{}, fmt.Errorf("inspection credentials must differ from webhook and metrics credentials")
+	}
+	return c, nil
+}
 
 func load(lookup func(string) (string, bool)) (Config, error) {
 	var c Config
@@ -109,6 +126,10 @@ func (c Config) Webhook(next http.Handler) http.Handler { return c.webhook.wrap(
 
 // Metrics protects only the metrics handler, independently of the webhook.
 func (c Config) Metrics(next http.Handler) http.Handler { return c.metrics.wrap("metrics", next) }
+
+func (c Config) Inspection(next http.Handler) http.Handler {
+	return c.inspection.wrap("inspection", next)
+}
 
 // Scheme reports the listener protocol without exposing configuration material.
 func (c Config) Scheme() string {
