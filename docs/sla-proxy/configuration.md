@@ -199,7 +199,7 @@ are needed whenever durable mode is enabled.
 
 | Key | Type | Default | Purpose / constraints | Level |
 |---|---|---|---|---|
-| `sla_definitions` | ordered list | required for observe-only | At least one definition; durable modes allow an empty list to retain known resolutions after policy removal | Required |
+| `sla_definitions` | ordered list | required for reobserve-only | At least one definition; durable modes allow an empty list to retain known resolutions after policy removal | Required |
 | `sla_definitions[].sla_label` | string | none | Unique selector label matching `[a-zA-Z_][a-zA-Z0-9_]*`; no implicit `sla_id` | Required |
 | `sla_definitions[].slas` | map | none | Nonempty map of nonblank policy names, scoped to this definition | Required |
 | `slas.<name>.timezone` | string | none | Explicit IANA zone, including `UTC`; `Local` rejected; zone data embedded | Required |

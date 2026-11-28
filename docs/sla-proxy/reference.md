@@ -17,6 +17,7 @@ For diagnosis and recovery procedures, see [operations](operations.md).
 | GET | `/readyz` | Observation capability and rolling dataset coverage, or additionally active policy/store readiness in durable modes; HTTP 503 while stopping/unavailable |
 | GET | `/api/v1/occurrences` | List stored occurrences in durable modes |
 | GET | `/api/v1/occurrences/{occurrence_id}` | Inspect a stored occurrence and its sink bindings |
+| GET | `/api/v1/delivery-work` | List outstanding delivery work by sink, action and state |
 
 ### Input validation
 
@@ -77,7 +78,7 @@ commit are distinct events. See [delivery ordering](operations.md#delivery-order
 
 ## Occurrence inspection
 
-Both routes are available in durable modes. To require Basic Auth,
+Inspection routes are available in durable modes. To require Basic Auth,
 [configure separate inspection credentials](configuration.md#inbound-https-and-endpoint-authentication).
 Responses are JSON on success and use `Cache-Control: no-store`.
 
@@ -89,6 +90,7 @@ Responses are JSON on success and use `Cache-Control: no-store`.
 | `alertname`, `fingerprint` | Exact occurrence values |
 | `sink_id`, `hold_reason` | Exact binding values shown by the inspection API |
 | `eligibility` | `eligible`, `ineligible`, `pending` or `unknown` |
+| `sla_window` | Current window on a binding, `open`, `closed` or `unknown` |
 | `delivery` | `not_delivered`, `pending_delivery`, `delivered` or `delivery_failed` |
 | `limit` | Maximum results per page, 1–100, default 25 |
 | `cursor` | Opaque `next_cursor` from the previous page, with the same filters |
@@ -105,8 +107,26 @@ Compacted records without an alert name are omitted from exact name searches.
 Detail responses include lifecycle and retention timestamps, record version,
 resolution conflicts, and per-sink policy versions, holds, next evaluation,
 lease expiry, attempts, retry time and committed receipts where present.
-`firing` represents the last accepted lifecycle. Stored eligibility can remain
-`eligible` after the SLA window closes. See the [inspection specification](../specifications/sla-proxy-inspection-api.md)
+`firing` represents the last accepted lifecycle. List and detail responses
+show `sla_window` on each binding evaluated at the UTC `as_of` timestamp.
+This uses the policy version recorded when the occurrence was accepted.
+Stored eligibility can remain `eligible` after the SLA window closes.
+
+When `sla_window` is `unknown`, the binding also includes
+`sla_window_reason`:
+
+| Reason | Meaning |
+|---|---|
+| `policy_changed` | The configured policy has a different version from the stored policy |
+| `policy_removed` | The stored policy is absent from the current configuration |
+| `holiday_coverage_missing` | The holiday dataset does not cover the current local date |
+| `calendar_error` | The calendar could not be evaluated for another reason |
+
+The window reason explains calendar evaluation and can appear even after the
+binding has a resolved delivery receipt. `hold_reason` describes a delivery
+hold and is shown separately.
+
+See the [inspection specification](../specifications/sla-proxy-inspection-api.md)
 for the response and pagination contract.
 
 Invalid list parameters, cursors or occurrence IDs return `400`. Invalid
@@ -124,13 +144,13 @@ page=$(curl -fsS 'http://localhost:9012/api/v1/occurrences?lifecycle=firing&limi
 printf '%s\n' "$page" | jq .
 ```
 
-The response contains an `items` array and, when more candidates remain, a
+The response contains an `items` array, an `as_of` timestamp and, when more candidates remain, a
 `next_cursor` string. A response can have an empty `items` array and still
 provide a cursor because the list walks a bounded number of stored candidates
 per request:
 
 ```json
-{"items": [], "next_cursor": "<opaque token>"}
+{"items": [], "as_of": "2026-11-26T11:00:00Z", "next_cursor": "<opaque token>"}
 ```
 
 Pass the returned token as `cursor` with the same filters. You can keep or
@@ -146,8 +166,37 @@ if [ -n "$cursor" ]; then
 fi
 ```
 
-Ordering is unspecified, the walk is not a snapshot, and duplicate items can
-appear across pages. Use `occurrence_id` to deduplicate when needed.
+The cursor keeps the first page's `as_of` timestamp for subsequent pages.
+Valkey records may change during the walk and ordering is unspecified. Use
+`occurrence_id` to deduplicate occurrence results when needed.
+
+## Delivery work inspection
+
+`GET /api/v1/delivery-work` returns one item per outstanding firing or
+resolved delivery intent. It uses the same status codes, security and
+pagination as the occurrence list. Its filters are `sink_id`, `action`
+(`firing` or `resolved`), and `state`. For example:
+
+```bash
+curl -fsS 'http://localhost:9012/api/v1/delivery-work?sink_id=servicenow&state=retry_scheduled&limit=10'
+```
+
+| State | Meaning | Deadline field |
+|---|---|---|
+| `due` | Send or retry is ready at `as_of` | `due_at` |
+| `scheduled` | First attempt has a future due time | `due_at` |
+| `retry_scheduled` | Retry deadline is in the future | `next_attempt_at` |
+| `claimed` | A worker has a persisted claim whose lease has time left | `lease_expires_at` |
+| `claim_expired` | A persisted claim has reached its lease deadline and awaits recovery | `lease_expires_at` |
+| `held` | A hold or permanent failure blocks the intent | — |
+
+Items link to occurrence detail via `occurrence_url` and identify the
+binding, sink and intent. They include attempts and available failure or hold
+reasons. Committed receipts are available on occurrence detail. The queue
+view focuses on work with a claim, a hold or a due time. Alerts waiting for
+their first SLA opportunity are covered by occurrence inspection.
+The response includes `delivery_enabled` so operators can identify prepared
+work in durable-state-only mode. Use `intent_id` to deduplicate across pages.
 
 ## Observe-only responses
 

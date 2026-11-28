@@ -71,6 +71,11 @@ to inspect its per-sink holds, retries and receipts. For example, a query for
 `lifecycle=firing&sink_id=servicenow&delivery=delivery_failed` lists firing
 occurrences with a failed ServiceNow binding.
 
+Use `sla_window=closed` to find bindings outside their current SLA window.
+Use the [delivery-work API](reference.md#delivery-work-inspection) to find
+specific retries, held intents or expired leases behind a metric. Its
+`occurrence_url` leads to the full per-sink state and receipts.
+
 Each sink binding can have separate firing and resolved [delivery intents](concepts.md#delivery-lifecycle) stored by the proxy.
 
 ```mermaid
